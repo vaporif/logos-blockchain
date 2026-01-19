@@ -7047,6 +7047,7 @@ dependencies = [
  "nomos-wallet 0.1.0",
  "num-bigint",
  "overwatch",
+ "serde_json",
  "serde_yaml",
  "tokio",
 ]
