@@ -384,62 +384,66 @@ where
                         // If it's a new epoch or the service just started, pre-compute the first winning slot and notify consumers.
                         winning_pol_slot_notifier.process_epoch(&eligible_utxos.response, &epoch_state, &kms_api).await;
 
-                       if let Some((private_inputs, signing_key)) = claim_leadership(&eligible_utxos.response, latest_tree, &epoch_state, slot, &winning_pol_slot_notifier, &kms_api).await {
-                            let voucher_cm = match wallet_api.generate_new_voucher().await {
-                                Ok(voucher_cm) => voucher_cm,
-                                Err(e) => {
-                                    error!("Failed to get the voucher cm: {:?}", e);
-                                    continue;
-                                }
+
+
+                       let Some((private_inputs, signing_key)) = claim_leadership(&eligible_utxos.response, latest_tree, &epoch_state, slot, &winning_pol_slot_notifier, &kms_api).await else {
+                            continue;
+                        };
+                        let voucher_cm = match wallet_api.generate_new_voucher().await {
+                            Ok(voucher_cm) => voucher_cm,
+                            Err(e) => {
+                                error!("Failed to get the voucher cm: {:?}", e);
+                                continue;
+                            }
+                        };
+
+                        let relays = relays.clone();
+                        let ledger_config = ledger_config.clone();
+                        let cryptarchia_api = cryptarchia_api.clone();
+                        let blend_adapter = blend_adapter.clone();
+                        let tx_selector = tx_selector.clone();
+
+                        tokio::spawn(async move {
+                            let Some(proof) = generate_leader_proof(private_inputs).await else {
+                                return;
                             };
 
-                            let relays = relays.clone();
-                            let ledger_config = ledger_config.clone();
-                            let cryptarchia_api = cryptarchia_api.clone();
-                            let blend_adapter = blend_adapter.clone();
-                            let tx_selector = tx_selector.clone();
-
-                            tokio::spawn(async move {
-                                let Some(proof) = generate_leader_proof(private_inputs).await else {
-                                    return;
-                                };
-
-                                match Self::propose_block(
-                                    parent,
-                                    slot,
-                                    proof,
-                                    &signing_key,
-                                    tx_selector,
-                                    &relays,
-                                    tip_state,
-                                    &ledger_config,
-                                    voucher_cm,
-                                )
-                                .await
-                                {
-                                    Ok(block) => {
-                                        // Process our own block first to ensure it's valid
-                                        match cryptarchia_api.apply_block(block.clone()).await {
-                                            Ok((tip, reorged_txs)) => {
-                                                // Block successfully processed, now remove included txs from mempool and publish it to the network.
-                                                // Assert that the proposed block is added to the honest chain.
-                                                assert!(tip == block.header().id());
-                                                assert!(reorged_txs.is_empty());
-                                                Self::remove_txs_in_block_from_mempool(&block, &relays).await;
-                                                let proposal = block.to_proposal();
-                                                blend_adapter.publish_proposal(proposal).await;
-                                            }
-                                            Err(e) => {
-                                                error!(target: LOG_TARGET, "Error processing local block: {:?}", e);
-                                            }
+                            match Self::propose_block(
+                                parent,
+                                slot,
+                                proof,
+                                &signing_key,
+                                tx_selector,
+                                &relays,
+                                tip_state,
+                                &ledger_config,
+                                voucher_cm,
+                            )
+                            .await
+                            {
+                                Ok(block) => {
+                                    // Process our own block first to ensure it's valid
+                                    match cryptarchia_api.apply_block(block.clone()).await {
+                                        Ok((tip, reorged_txs)) => {
+                                            // Block successfully processed, now remove included txs from mempool and publish it to the network.
+                                            // Assert that the proposed block is added to the honest chain.
+                                            assert!(tip == block.header().id());
+                                            assert!(reorged_txs.is_empty());
+                                            Self::remove_txs_in_block_from_mempool(&block, &relays).await;
+                                            let proposal = block.to_proposal();
+                                            blend_adapter.publish_proposal(proposal).await;
+                                        }
+                                        Err(e) => {
+                                            error!(target: LOG_TARGET, "Error processing local block: {:?}", e);
                                         }
                                     }
-                                    Err(e) => {
-                                        error!(target: LOG_TARGET, "{e}");
-                                    }
                                 }
+                                Err(e) => {
+                                    error!(target: LOG_TARGET, "{e}");
+                                }
+                            }
                             });
-                        }
+
                     }
 
                     Some(msg) = self.service_resources_handle.inbound_relay.next() => {
