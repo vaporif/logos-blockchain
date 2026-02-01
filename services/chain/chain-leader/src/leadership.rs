@@ -16,14 +16,14 @@ use tokio::sync::watch::Sender;
 
 use crate::{WinningPolInfo, kms::KmsAdapter};
 
-/// Claim leadership for the given slot if we win the lottery.
-///
-/// Returns the private inputs and signing key needed for proof generation,
-/// or `None` if we didn't win.
 #[expect(
     clippy::cognitive_complexity,
     reason = "TODO: Address this at some point"
 )]
+/// Claim leadership for the given slot if we win the lottery.
+///
+/// Returns the private inputs and signing key needed for proof generation,
+/// or `None` if we didn't win.
 pub async fn claim_leadership<RuntimeServiceId>(
     utxos: &[UtxoWithKeyId],
     latest_tree: &UtxoTree,
@@ -81,7 +81,6 @@ pub async fn claim_leadership<RuntimeServiceId>(
     None
 }
 
-/// Generate the ZK leader proof. This is the slow/heavy part that should be spawned.
 pub async fn generate_leader_proof(private_inputs: LeaderPrivate) -> Option<Groth16LeaderProof> {
     let res = tokio::task::spawn_blocking(move || {
         Groth16LeaderProof::prove(

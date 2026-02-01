@@ -393,7 +393,6 @@ where
                                 }
                             };
 
-                            // Spawn proof generation + block proposal to keep select loop responsive
                             let relays = relays.clone();
                             let ledger_config = ledger_config.clone();
                             let cryptarchia_api = cryptarchia_api.clone();
@@ -401,7 +400,6 @@ where
                             let tx_selector = tx_selector.clone();
 
                             tokio::spawn(async move {
-                                // Generate ZK proof (slow)
                                 let Some(proof) = generate_leader_proof(private_inputs).await else {
                                     return;
                                 };
