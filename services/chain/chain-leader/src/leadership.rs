@@ -16,23 +16,22 @@ use tokio::sync::watch::Sender;
 
 use crate::{WinningPolInfo, kms::KmsAdapter};
 
+/// Claim leadership for the given slot if we win the lottery.
+///
+/// Returns the private inputs and signing key needed for proof generation,
+/// or `None` if we didn't win.
 #[expect(
     clippy::cognitive_complexity,
     reason = "TODO: Address this at some point"
 )]
-/// Return a leadership proof and signing key if the current slot is a
-/// winning one, and notifies consumers of winning slot info.
-///
-/// If the slot is not a winning one, it returns `None` and no consumer is
-/// notified.
-pub async fn build_proof_for<RuntimeServiceId>(
+pub async fn claim_leadership<RuntimeServiceId>(
     utxos: &[UtxoWithKeyId],
     latest_tree: &UtxoTree,
     epoch_state: &EpochState,
     slot: Slot,
     winning_pol_info_notifier: &WinningPoLSlotNotifier<'_>,
     kms: &(impl KmsAdapter<RuntimeServiceId, KeyId = KeyId> + Sync),
-) -> Option<(Groth16LeaderProof, Ed25519Key)> {
+) -> Option<(LeaderPrivate, Ed25519Key)> {
     for UtxoWithKeyId { utxo, key_id } in utxos {
         let secret_key = kms.get_leader_key(key_id.clone()).await;
         let public_inputs = public_inputs_for_slot(epoch_state, slot, latest_tree);
@@ -69,33 +68,39 @@ pub async fn build_proof_for<RuntimeServiceId>(
                 slot,
             );
 
-            let res = tokio::task::spawn_blocking(move || {
-                Groth16LeaderProof::prove(
-                    private_inputs,
-                    VoucherCm::default(), // TODO: use actual voucher commitment
-                )
-            })
-            .await;
-            match res {
-                Ok(Ok(proof)) => return Some((proof, leader_signing_key)),
-                Ok(Err(e)) => {
-                    tracing::error!("Failed to build proof: {:?}", e);
-                }
-                Err(e) => {
-                    tracing::error!("Failed to wait thread to build proof: {:?}", e);
-                }
-            }
-        } else {
-            tracing::trace!(
-                "Not a leader for slot {:?}, {:?}/{:?}",
-                slot,
-                utxo.note.value,
-                epoch_state.total_stake()
-            );
+            return Some((private_inputs, leader_signing_key));
         }
+        tracing::trace!(
+            "Not a leader for slot {:?}, {:?}/{:?}",
+            slot,
+            utxo.note.value,
+            epoch_state.total_stake()
+        );
     }
 
     None
+}
+
+/// Generate the ZK leader proof. This is the slow/heavy part that should be spawned.
+pub async fn generate_leader_proof(private_inputs: LeaderPrivate) -> Option<Groth16LeaderProof> {
+    let res = tokio::task::spawn_blocking(move || {
+        Groth16LeaderProof::prove(
+            private_inputs,
+            VoucherCm::default(), // TODO: use actual voucher commitment
+        )
+    })
+    .await;
+    match res {
+        Ok(Ok(proof)) => Some(proof),
+        Ok(Err(e)) => {
+            tracing::error!("Failed to build proof: {:?}", e);
+            None
+        }
+        Err(e) => {
+            tracing::error!("Failed to wait thread to build proof: {:?}", e);
+            None
+        }
+    }
 }
 
 /// Check if the given note is owned by the leader and wins the lottery with
@@ -358,7 +363,7 @@ mod pol_tests {
         let notifier = WinningPoLSlotNotifier::new(&config, &sender);
 
         // Find a winning slot by calling `build_proof_for` until it succeeds
-        let (proof, winning_slot) = find_winning_slot_and_build_proof(
+        let (proof, winning_slot) = find_winning_slot_and_generate_proof(
             (0..1000).map(Slot::from),
             UtxoWithKeyId { utxo, key_id },
             &epoch_state,
@@ -383,8 +388,8 @@ mod pol_tests {
         );
     }
 
-    /// Find a winning slot by calling `build_proof_for` until it succeeds
-    async fn find_winning_slot_and_build_proof(
+    /// Find a winning slot and generate proof for it
+    async fn find_winning_slot_and_generate_proof(
         slots: impl Iterator<Item = Slot>,
         utxo: UtxoWithKeyId,
         epoch_state: &EpochState,
@@ -393,7 +398,7 @@ mod pol_tests {
         kms: &(impl KmsAdapter<(), KeyId = KeyId> + Sync),
     ) -> Option<(Groth16LeaderProof, Slot)> {
         for slot in slots {
-            if let Some((proof, _signing_key)) = build_proof_for(
+            if let Some((private_inputs, _signing_key)) = claim_leadership(
                 slice::from_ref(&utxo),
                 latest_tree,
                 epoch_state,
@@ -403,7 +408,9 @@ mod pol_tests {
             )
             .await
             {
-                return Some((proof, slot));
+                if let Some(proof) = generate_leader_proof(private_inputs).await {
+                    return Some((proof, slot));
+                }
             }
         }
         None

@@ -13,6 +13,15 @@ pub struct MempoolAdapter<Payload, Tx> {
     _payload: PhantomData<Payload>,
 }
 
+impl<Payload, Tx> Clone for MempoolAdapter<Payload, Tx> {
+    fn clone(&self) -> Self {
+        Self {
+            mempool_relay: self.mempool_relay.clone(),
+            _payload: PhantomData,
+        }
+    }
+}
+
 impl<Payload, Tx> MempoolAdapter<Payload, Tx> {
     #[must_use]
     pub const fn new(
