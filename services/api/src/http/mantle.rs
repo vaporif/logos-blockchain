@@ -196,8 +196,7 @@ where
         + 'static
         + lb_core::mantle::Transaction<Hash = TxHash>,
     StorageBackend: lb_storage_service::backends::StorageBackend + Send + Sync + 'static,
-    <StorageBackend as StorageChainApi>::Block:
-        TryFrom<Block<Transaction>> + TryInto<Block<Transaction>>,
+    <StorageBackend as StorageChainApi>::Block: AsRef<[u8]> + From<Bytes>,
     <StorageBackend as StorageChainApi>::Tx: From<Bytes> + AsRef<[u8]>,
     ConsensusService: ServiceData<Message = ConsensusMsg<Transaction>>,
     RuntimeServiceId: Debug
@@ -321,8 +320,7 @@ where
         + 'static
         + lb_core::mantle::Transaction<Hash = TxHash>,
     StorageBackend: lb_storage_service::backends::StorageBackend + Send + Sync + 'static,
-    <StorageBackend as StorageChainApi>::Block:
-        TryFrom<Block<Transaction>> + TryInto<Block<Transaction>>,
+    <StorageBackend as StorageChainApi>::Block: AsRef<[u8]> + From<Bytes>,
     <StorageBackend as StorageChainApi>::Tx: From<Bytes> + AsRef<[u8]>,
     RuntimeServiceId:
         Debug + Sync + Display + AsServiceId<StorageService<StorageBackend, RuntimeServiceId>>,

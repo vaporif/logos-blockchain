@@ -48,7 +48,7 @@ impl<Storage, Tx, RuntimeServiceId> StorageAdapterTrait<RuntimeServiceId>
     for StorageAdapter<Storage, Tx, RuntimeServiceId>
 where
     Storage: StorageBackend + Send + Sync + 'static,
-    <Storage as StorageChainApi>::Block: TryFrom<Block<Tx>> + TryInto<Block<Tx>>,
+    <Storage as StorageChainApi>::Block: AsRef<[u8]> + From<Bytes>,
     <Storage as StorageChainApi>::Tx: From<Bytes> + AsRef<[u8]>,
     Tx: Clone
         + Eq
@@ -84,7 +84,7 @@ where
 
         if let Ok(maybe_block) = receiver.await {
             let block = maybe_block?;
-            block.try_into().ok()
+            Block::from_bytes(block.as_ref()).ok()
         } else {
             tracing::error!("Failed to receive block from storage relay");
             None
@@ -97,7 +97,8 @@ where
         block: Self::Block,
     ) -> Result<(), overwatch::DynError> {
         let block = block
-            .try_into()
+            .to_bytes()
+            .map(Into::into)
             .map_err(|_| "Failed to convert block to storage format")?;
 
         self.storage_relay
@@ -126,9 +127,8 @@ where
             return Ok(None);
         };
 
-        let deserialized_block = removed_block
-            .try_into()
-            .map_err(|_| "Failed to convert block to storage format.")?;
+        let deserialized_block = Block::from_bytes(removed_block.as_ref())
+            .map_err(|_| "Failed to deserialize block from storage format.")?;
 
         Ok(Some(deserialized_block))
     }

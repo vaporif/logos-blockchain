@@ -468,7 +468,7 @@ where
         + 'static,
     Storage: StorageBackend + Send + Sync + 'static,
     <Storage as StorageChainApi>::Tx: From<Bytes> + AsRef<[u8]>,
-    <Storage as StorageChainApi>::Block: TryFrom<Block<Tx>> + TryInto<Block<Tx>> + Into<Bytes>,
+    <Storage as StorageChainApi>::Block: AsRef<[u8]> + From<Bytes> + Into<Bytes>,
     TimeBackend: lb_time_service::backends::TimeBackend,
     TimeBackend::Settings: Clone + Send + Sync + 'static,
     RuntimeServiceId: Debug
@@ -677,7 +677,7 @@ where
         + 'static,
     Storage: StorageBackend + Send + Sync + 'static,
     <Storage as StorageChainApi>::Tx: From<Bytes> + AsRef<[u8]>,
-    <Storage as StorageChainApi>::Block: TryFrom<Block<Tx>> + TryInto<Block<Tx>> + Into<Bytes>,
+    <Storage as StorageChainApi>::Block: AsRef<[u8]> + From<Bytes> + Into<Bytes>,
     TimeBackend: lb_time_service::backends::TimeBackend,
     RuntimeServiceId: Display + AsServiceId<Self>,
 {

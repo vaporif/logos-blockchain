@@ -2,10 +2,7 @@ use std::fmt::{Debug, Display};
 
 use bytes::Bytes;
 use lb_chain_broadcast_service::{BlockBroadcastMsg, BlockBroadcastService};
-use lb_core::{
-    block::Block,
-    mantle::{AuthenticatedMantleTx, Transaction, TxHash},
-};
+use lb_core::mantle::{AuthenticatedMantleTx, Transaction, TxHash};
 use lb_storage_service::{
     StorageMsg, StorageService, api::chain::StorageChainApi, backends::StorageBackend,
 };
@@ -52,7 +49,7 @@ where
         + 'static,
     Storage: StorageBackend + Send + Sync + 'static,
     <Storage as StorageChainApi>::Tx: From<Bytes> + AsRef<[u8]>,
-    <Storage as StorageChainApi>::Block: TryFrom<Block<Tx>> + TryInto<Block<Tx>>,
+    <Storage as StorageChainApi>::Block: AsRef<[u8]> + From<Bytes>,
 {
     pub async fn new(
         broadcast_relay: BroadcastRelay,

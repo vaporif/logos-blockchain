@@ -8,7 +8,7 @@ use std::{
 
 use bytes::Bytes;
 use futures::{StreamExt as _, TryStreamExt as _, future, stream, stream::BoxStream};
-use lb_core::{block::Block, header::HeaderId};
+use lb_core::{block::Block, codec::DeserializeOp as _, header::HeaderId};
 use lb_cryptarchia_engine::{Branch, Slot};
 use lb_cryptarchia_sync::{BlocksResponse, ProviderResponse};
 use lb_storage_service::{StorageMsg, api::chain::StorageChainApi, backends::StorageBackend};
@@ -63,8 +63,8 @@ where
 impl<Storage, Tx> BlockProvider<Storage, Tx>
 where
     Storage: StorageBackend + 'static,
-    <Storage as StorageChainApi>::Block: TryInto<Block<Tx>> + Into<Bytes>,
-    Tx: Serialize + Clone + Eq + Send + Sync + 'static,
+    <Storage as StorageChainApi>::Block: AsRef<[u8]> + Into<Bytes>,
+    Tx: Serialize + serde::de::DeserializeOwned + Clone + Eq + Send + Sync + 'static,
 {
     pub const fn new(storage_relay: StorageRelay<Storage>) -> Self {
         Self {
@@ -492,8 +492,7 @@ where
         match response {
             None => Ok(None),
             Some(block) => Ok(Some(
-                block
-                    .try_into()
+                Block::from_bytes(block.as_ref())
                     .map_err(|_| GetBlocksError::ConversionError)?,
             )),
         }
@@ -556,7 +555,7 @@ mod tests {
 
     use futures::StreamExt as _;
     use lb_core::{
-        codec::DeserializeOp as _,
+        codec::{DeserializeOp as _, SerializeOp as _},
         crypto::ZkHasher,
         mantle::{Note, SignedMantleTx, ledger::Utxo},
         proofs::leader_proof::{LeaderPrivate, LeaderPublic},
@@ -847,12 +846,9 @@ mod tests {
         }
 
         async fn store_block_only(&self, block: &Block<SignedMantleTx>, header_id: HeaderId) {
-            let store_result: Result<_, _> = block.clone().try_into();
+            let block_bytes = block.to_bytes().expect("Failed to serialize block");
             self.storage_relay
-                .send(StorageMsg::store_block_request(
-                    header_id,
-                    store_result.unwrap(),
-                ))
+                .send(StorageMsg::store_block_request(header_id, block_bytes))
                 .await
                 .expect("Failed to store block");
         }

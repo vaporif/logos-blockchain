@@ -1,12 +1,11 @@
 use core::fmt::Debug;
 
-use ::serde::{Deserialize, Serialize, de::DeserializeOwned};
-use bytes::Bytes;
 use lb_cryptarchia_engine::Slot;
 use lb_key_management_system_keys::keys::{Ed25519Key, Ed25519Signature};
+use serde::{Deserialize, Serialize};
 
 use crate::{
-    codec::{DeserializeOp as _, SerializeOp as _},
+    codec::SerializeOp as _,
     header::{ContentId, Header, HeaderId},
     mantle::{Transaction, TxHash},
     proofs::leader_proof::{Groth16LeaderProof, LeaderProof as _},
@@ -195,22 +194,6 @@ impl<Tx> Block<Tx> {
             references,
             signature: self.signature,
         }
-    }
-}
-
-impl<Tx: Clone + Eq + Serialize + DeserializeOwned> TryFrom<Bytes> for Block<Tx> {
-    type Error = crate::codec::Error;
-
-    fn try_from(bytes: Bytes) -> Result<Self, Self::Error> {
-        Self::from_bytes(&bytes)
-    }
-}
-
-impl<Tx: Clone + Eq + Serialize + DeserializeOwned> TryFrom<Block<Tx>> for Bytes {
-    type Error = crate::codec::Error;
-
-    fn try_from(block: Block<Tx>) -> Result<Self, Self::Error> {
-        block.to_bytes()
     }
 }
 

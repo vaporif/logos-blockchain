@@ -16,7 +16,6 @@ use lb_api_service::http::{
 use lb_chain_broadcast_service::BlockBroadcastService;
 use lb_chain_service::ConsensusMsg;
 use lb_core::{
-    block::Block,
     header::HeaderId,
     mantle::{SignedMantleTx, Transaction},
 };
@@ -462,8 +461,7 @@ pub async fn blocks<StorageBackend, RuntimeServiceId>(
 where
     StorageBackend: lb_storage_service::backends::StorageBackend + Send + Sync + 'static, /* TODO: StorageChainApi */
     StorageBackend::Block: Serialize,
-    <StorageBackend as StorageChainApi>::Block:
-        TryFrom<Block<SignedMantleTx>> + TryInto<Block<SignedMantleTx>>,
+    <StorageBackend as StorageChainApi>::Block: AsRef<[u8]> + From<Bytes>,
     <StorageBackend as StorageChainApi>::Tx: From<Bytes> + AsRef<[u8]>,
     RuntimeServiceId: Debug
         + Sync
@@ -492,8 +490,7 @@ pub async fn blocks_stream<StorageBackend, ConsensusService, RuntimeServiceId>(
 where
     StorageBackend: lb_storage_service::backends::StorageBackend + Send + Sync + 'static,
     StorageBackend::Block: Serialize,
-    <StorageBackend as StorageChainApi>::Block:
-        TryFrom<Block<SignedMantleTx>> + TryInto<Block<SignedMantleTx>>,
+    <StorageBackend as StorageChainApi>::Block: AsRef<[u8]> + From<Bytes>,
     <StorageBackend as StorageChainApi>::Tx: From<Bytes> + AsRef<[u8]>,
     ConsensusService: ServiceData<Message = ConsensusMsg<SignedMantleTx>> + 'static,
     RuntimeServiceId: Debug

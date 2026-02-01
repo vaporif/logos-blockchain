@@ -181,7 +181,7 @@ where
     Tx: AuthenticatedMantleTx + Send + Sync + Clone + Eq + Serialize + DeserializeOwned + 'static,
     Cryptarchia: CryptarchiaServiceData<Tx = Tx>,
     Storage: StorageBackend + Send + Sync + 'static,
-    <Storage as StorageChainApi>::Block: TryFrom<Block<Tx>> + TryInto<Block<Tx>>,
+    <Storage as StorageChainApi>::Block: AsRef<[u8]> + From<Bytes>,
     <Storage as StorageChainApi>::Tx: From<Bytes> + AsRef<[u8]>,
     RuntimeServiceId: AsServiceId<Self>
         + AsServiceId<Cryptarchia>
@@ -321,7 +321,7 @@ where
     Tx: AuthenticatedMantleTx + Send + Sync + Clone + Eq + Serialize + DeserializeOwned + 'static,
     Cryptarchia: CryptarchiaServiceData<Tx = Tx> + Send + 'static,
     Storage: StorageBackend + Send + Sync + 'static,
-    <Storage as StorageChainApi>::Block: TryFrom<Block<Tx>> + TryInto<Block<Tx>>,
+    <Storage as StorageChainApi>::Block: AsRef<[u8]> + From<Bytes>,
     <Storage as StorageChainApi>::Tx: From<Bytes> + AsRef<[u8]>,
     RuntimeServiceId:
         AsServiceId<Cryptarchia> + AsServiceId<Kms> + std::fmt::Debug + std::fmt::Display + Sync,
