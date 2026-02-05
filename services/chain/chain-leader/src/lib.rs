@@ -323,8 +323,6 @@ where
             .notifier()
             .get_updated_settings();
 
-        // TODO: check active slot coeff is exactly 1/30
-
         let mut winning_pol_slot_notifier =
             WinningPoLSlotNotifier::new(&ledger_config, &self.winning_pol_epoch_slots_sender);
 
@@ -350,6 +348,7 @@ where
             blend_broadcast_settings.clone(),
         );
 
+        // Wait for other service (except ChainLeader) to become ready, with timeout.
         wait_until_services_are_ready!(
             &self.service_resources_handle.overwatch_handle,
             Some(Duration::from_secs(60)),
@@ -362,6 +361,14 @@ where
             PreloadKmsService<_>
         )
         .await?;
+        // Wait for ChainLeader service to become ready.
+        // No timeout since it becomes ready only after IBD is complete.
+        wait_until_services_are_ready!(
+            &self.service_resources_handle.overwatch_handle,
+            None,
+            ChainNetwork
+        )
+        .await?;
 
         let mut slot_timer = {
             let (sender, receiver) = oneshot::channel();
@@ -372,6 +379,15 @@ where
                 .expect("Request time subscription to time service should succeed");
             receiver.await?
         };
+
+        // Wait until the chain becomes Online mode.
+        // We should not propose blocks while the chain is in Bootstrapping mode.
+        info!("Waiting for chain to become Online mode");
+        cryptarchia_api
+            .wait_until_chain_becomes_online()
+            .await
+            .expect("Waiting for chain to be online should succeed");
+        info!("Chain is now Online. Starting block proposals.");
 
         self.service_resources_handle.status_updater.notify_ready();
         info!(
