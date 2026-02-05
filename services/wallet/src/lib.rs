@@ -584,7 +584,8 @@ where
                     OpProof::ZkSig(zk_sig)
                 }
                 Op::LeaderClaim(claim_op) => {
-                    Self::prove_leader_claim_op(claim_op.clone(), &ledger, wallet, kms).await?
+                    Self::prove_leader_claim_op(claim_op.clone(), tx_hash, &ledger, wallet, kms)
+                        .await?
                 }
             };
             ops_proofs.push(proof);
@@ -649,6 +650,7 @@ where
 
     async fn prove_leader_claim_op(
         op: LeaderClaimOp,
+        tx_hash: TxHash,
         ledger: &LedgerState,
         wallet: &Wallet,
         kms: &KmsServiceApi<Kms, RuntimeServiceId>,
@@ -667,7 +669,7 @@ where
 
         // TODO: This should happen in KMS
         let poc = tokio::task::spawn_blocking(move || {
-            Self::generate_poc(voucher_secret, &path, op.rewards_root, op.mantle_tx_hash)
+            Self::generate_poc(voucher_secret, &path, op.rewards_root, tx_hash)
         })
         .await??;
 
