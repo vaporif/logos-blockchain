@@ -4831,7 +4831,6 @@ name = "logos-blockchain-http-api-common"
 version = "0.1.0"
 dependencies = [
  "axum 0.7.9",
- "governor",
  "logos-blockchain-core 0.1.0",
  "logos-blockchain-key-management-system-keys 0.1.0",
  "pprof",
@@ -4839,7 +4838,6 @@ dependencies = [
  "serde_json",
  "serde_with",
  "tokio",
- "tower_governor",
  "tracing",
 ]
 
