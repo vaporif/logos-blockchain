@@ -4587,10 +4587,13 @@ name = "logos-blockchain-common-http-client"
 version = "0.1.0"
 dependencies = [
  "futures",
+ "hex",
  "logos-blockchain-chain-broadcast-service 0.1.0",
  "logos-blockchain-chain-service 0.1.0",
  "logos-blockchain-core 0.1.0",
+ "logos-blockchain-groth16 0.1.0",
  "logos-blockchain-http-api-common 0.1.0",
+ "logos-blockchain-key-management-system-keys 0.1.0",
  "reqwest",
  "serde",
  "serde_json",
@@ -4790,6 +4793,22 @@ dependencies = [
  "tower-http 0.6.8",
  "tracing",
  "tracing-subscriber 0.3.22",
+]
+
+[[package]]
+name = "logos-blockchain-faucet"
+version = "0.1.0"
+dependencies = [
+ "axum 0.7.9",
+ "clap",
+ "hex",
+ "logos-blockchain-common-http-client 0.1.0",
+ "logos-blockchain-groth16 0.1.0",
+ "logos-blockchain-http-api-common 0.1.0",
+ "logos-blockchain-key-management-system-keys 0.1.0",
+ "logos-blockchain-node 0.1.0",
+ "reqwest",
+ "tokio",
 ]
 
 [[package]]
