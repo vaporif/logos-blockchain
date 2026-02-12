@@ -5,36 +5,42 @@ use std::{
     path::{Path, PathBuf},
 };
 
+use ::tracing::{Level, warn};
 #[cfg(feature = "config-gen")]
 use clap::Subcommand;
 use clap::{Parser, ValueEnum, builder::OsStr};
 use color_eyre::eyre::{Result, eyre};
 use lb_libp2p::{Multiaddr, ed25519::SecretKey};
-use lb_tracing::logging::{gelf::GelfConfig, local::FileConfig};
-use lb_tracing_service::{LoggerLayer, Tracing};
-use overwatch::services::ServiceData;
 use serde::Deserialize;
-use tracing::{Level, warn};
 
-use crate::{
-    ApiService, CryptarchiaService, KeyManagementService, RuntimeServiceId, StorageService,
-    config::{
-        blend::serde::Config as BlendConfig,
-        cryptarchia::serde::Config as CryptarchiaConfig,
-        deployment::{DeploymentSettings, WellKnownDeployment},
-        mempool::serde::Config as MempoolConfig,
-        network::serde::Config as NetworkConfig,
-        time::serde::Config as TimeConfig,
-    },
-    generic_services::{SdpService, WalletService},
+use crate::config::tracing::serde::logger::{FileConfig, GelfConfig, Layer};
+pub use crate::config::{
+    api::serde::Config as ApiConfig,
+    blend::serde::Config as BlendConfig,
+    cryptarchia::serde::Config as CryptarchiaConfig,
+    deployment::{DeploymentSettings, WellKnownDeployment},
+    kms::serde::Config as KmsConfig,
+    mempool::serde::Config as MempoolConfig,
+    network::serde::Config as NetworkConfig,
+    sdp::serde::Config as SdpConfig,
+    storage::serde::Config as StorageConfig,
+    time::serde::Config as TimeConfig,
+    tracing::serde::Config as TracingConfig,
+    wallet::serde::Config as WalletConfig,
 };
 
+pub mod api;
 pub mod blend;
 pub mod cryptarchia;
 pub mod deployment;
+pub mod kms;
 pub mod mempool;
 pub mod network;
+pub mod sdp;
+pub mod storage;
 pub mod time;
+pub mod tracing;
+pub mod wallet;
 
 #[cfg(test)]
 mod tests;
@@ -65,7 +71,7 @@ pub struct CliArgs {
     blend: BlendArgs,
     /// Overrides http config.
     #[clap(flatten)]
-    http: HttpArgs,
+    api: ApiArgs,
     #[clap(flatten)]
     deployment: DeploymentArgs,
 }
@@ -202,9 +208,9 @@ pub struct BlendArgs {
 }
 
 #[derive(Parser, Debug, Clone)]
-pub struct HttpArgs {
+pub struct ApiArgs {
     #[clap(long = "http-host", env = "HTTP_HOST")]
-    pub http_addr: Option<SocketAddr>,
+    pub addr: Option<SocketAddr>,
 
     #[clap(long = "http-cors-origin", env = "HTTP_CORS_ORIGIN")]
     pub cors_origins: Option<Vec<String>>,
@@ -275,28 +281,31 @@ impl FromStr for DeploymentType {
     derive(serde::Serialize)
 )]
 pub struct UserConfig {
+    #[serde(default)]
     pub network: NetworkConfig,
     pub blend: BlendConfig,
     pub cryptarchia: CryptarchiaConfig,
+    #[serde(default)]
     pub time: TimeConfig,
+    #[serde(default)]
     pub mempool: MempoolConfig,
-
-    pub tracing: <Tracing<RuntimeServiceId> as ServiceData>::Settings,
-    pub sdp: <SdpService<RuntimeServiceId> as ServiceData>::Settings,
-    pub http: <ApiService as ServiceData>::Settings,
-    pub storage: <StorageService as ServiceData>::Settings,
-    pub key_management: <KeyManagementService as ServiceData>::Settings,
-    pub wallet: <WalletService<CryptarchiaService, RuntimeServiceId> as ServiceData>::Settings,
-
-    #[cfg(feature = "testing")]
-    pub testing_http: <ApiService as ServiceData>::Settings,
+    pub sdp: SdpConfig,
+    #[serde(default)]
+    pub api: ApiConfig,
+    #[serde(default)]
+    pub storage: StorageConfig,
+    #[serde(default)]
+    pub kms: KmsConfig,
+    pub wallet: WalletConfig,
+    #[serde(default)]
+    pub tracing: TracingConfig,
 }
 
 impl UserConfig {
     pub fn update_from_args(mut self, args: CliArgs) -> Result<RunConfig> {
         let CliArgs {
             log: log_args,
-            http: http_args,
+            api: api_args,
             network: network_args,
             blend: blend_args,
             deployment: deployment_args,
@@ -305,7 +314,7 @@ impl UserConfig {
         update_tracing(&mut self.tracing, log_args)?;
         update_network(&mut self.network, network_args)?;
         update_blend(&mut self.blend, blend_args)?;
-        update_http(&mut self.http, http_args)?;
+        update_api(&mut self.api, api_args)?;
 
         let deployment_settings = match deployment_args.deployment_type() {
             DeploymentType::WellKnown(well_known_deployment) => (*well_known_deployment).into(),
@@ -324,10 +333,7 @@ impl UserConfig {
     }
 }
 
-pub fn update_tracing(
-    tracing: &mut <Tracing<RuntimeServiceId> as ServiceData>::Settings,
-    tracing_args: LogArgs,
-) -> Result<()> {
+pub fn update_tracing(tracing: &mut TracingConfig, tracing_args: LogArgs) -> Result<()> {
     let LogArgs {
         backend,
         log_addr: addr,
@@ -339,20 +345,20 @@ pub fn update_tracing(
     // Override the file config with the one from env variables.
     if let Some(backend) = backend {
         tracing.logger = match backend {
-            LoggerLayerType::Gelf => LoggerLayer::Gelf(GelfConfig {
+            LoggerLayerType::Gelf => Layer::Gelf(GelfConfig {
                 addr: addr
                     .ok_or_else(|| eyre!("Gelf backend requires an address."))?
                     .to_socket_addrs()?
                     .next()
                     .ok_or_else(|| eyre!("Invalid gelf address"))?,
             }),
-            LoggerLayerType::File => LoggerLayer::File(FileConfig {
+            LoggerLayerType::File => Layer::File(FileConfig {
                 directory: directory.ok_or_else(|| eyre!("File backend requires a directory."))?,
                 prefix,
             }),
-            LoggerLayerType::Stdout => LoggerLayer::Stdout,
-            LoggerLayerType::Stderr => LoggerLayer::Stderr,
-        }
+            LoggerLayerType::Stdout => Layer::Stdout,
+            LoggerLayerType::Stderr => Layer::Stderr,
+        };
     }
 
     if let Some(level_str) = level {
@@ -407,21 +413,15 @@ pub fn update_blend(blend: &mut BlendConfig, blend_args: BlendArgs) -> Result<()
     Ok(())
 }
 
-pub fn update_http(
-    http: &mut <ApiService as ServiceData>::Settings,
-    http_args: HttpArgs,
-) -> Result<()> {
-    let HttpArgs {
-        http_addr,
-        cors_origins,
-    } = http_args;
+pub fn update_api(api: &mut ApiConfig, args: ApiArgs) -> Result<()> {
+    let ApiArgs { addr, cors_origins } = args;
 
-    if let Some(addr) = http_addr {
-        http.backend_settings.address = addr;
+    if let Some(addr) = addr {
+        api.backend.listen_address = addr;
     }
 
     if let Some(cors) = cors_origins {
-        http.backend_settings.cors_origins = cors;
+        api.backend.cors_origins = cors;
     }
 
     Ok(())

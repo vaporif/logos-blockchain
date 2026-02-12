@@ -7,8 +7,8 @@ use axum::{
     response::IntoResponse,
     routing::{get, post},
 };
-use lb_tests::nodes::validator::create_validator_config;
-use lb_tracing_service::TracingSettings;
+use lb_node::config::TracingConfig;
+use lb_tests::nodes::create_validator_config;
 use reqwest::header::CONTENT_TYPE;
 use serde::Deserialize;
 use tokio::sync::oneshot::channel;
@@ -26,7 +26,7 @@ pub struct CfgSyncConfig {
 
     pub faucet_settings: FaucetSettings,
     // Tracing params
-    pub tracing_settings: TracingSettings,
+    pub tracing_settings: TracingConfig,
 }
 
 impl CfgSyncConfig {
@@ -38,7 +38,7 @@ impl CfgSyncConfig {
     }
 
     #[must_use]
-    pub fn tracing_settings(&self) -> TracingSettings {
+    pub fn tracing_settings(&self) -> TracingConfig {
         self.tracing_settings.clone()
     }
 

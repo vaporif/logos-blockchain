@@ -1,4 +1,4 @@
-use lb_key_management_system_service::backend::preload::PreloadKMSBackendSettings;
+use lb_node::config::{KmsConfig, kms::serde::PreloadKmsBackendSettings};
 use lb_tests::{
     common::kms::key_id_for_preload_backend,
     topology::configs::{blend::GeneralBlendConfig, consensus::GeneralConsensusConfig},
@@ -11,12 +11,12 @@ pub fn create_kms_configs(
     blend_configs: &[GeneralBlendConfig],
     consensus_configs: &[GeneralConsensusConfig],
     faucet_note_keys: &[FaucetNotes],
-) -> Vec<PreloadKMSBackendSettings> {
-    let mut kms_configs: Vec<PreloadKMSBackendSettings> = blend_configs
+) -> Vec<KmsConfig> {
+    let mut kms_configs: Vec<KmsConfig> = blend_configs
         .iter()
         .enumerate()
-        .map(
-            |(i, (blend_conf, private_key, zk_secret_key))| PreloadKMSBackendSettings {
+        .map(|(i, (blend_conf, private_key, zk_secret_key))| KmsConfig {
+            backend: PreloadKmsBackendSettings {
                 keys: [
                     (
                         blend_conf.non_ephemeral_signing_key_id.clone(),
@@ -38,11 +38,11 @@ pub fn create_kms_configs(
                 ]
                 .into(),
             },
-        )
+        })
         .collect();
 
     for (config, note_keys) in kms_configs.iter_mut().zip(faucet_note_keys.iter()) {
-        config.keys.extend(note_keys.iter().map(|sk| {
+        config.backend.keys.extend(note_keys.iter().map(|sk| {
             (
                 key_id_for_preload_backend(&sk.clone().into()),
                 sk.clone().into(),

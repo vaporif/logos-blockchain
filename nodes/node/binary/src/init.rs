@@ -1,49 +1,29 @@
-use std::{
-    collections::{HashMap, HashSet},
-    net::{IpAddr, Ipv4Addr},
-    num::NonZeroU64,
-    str::FromStr as _,
-    time::Duration,
-};
+use core::str::FromStr as _;
+use std::collections::HashMap;
 
 use color_eyre::eyre::{Result, eyre};
-use lb_api_service::ApiServiceSettings;
-use lb_blend_service::core::settings::ZkSettings;
-use lb_chain_leader_service::LeaderWalletConfig;
-use lb_chain_network_service::{IbdConfig, OrphanConfig, SyncConfig};
-use lb_chain_service::OfflineGracePeriodConfig;
-use lb_core::mantle::Value;
 use lb_groth16::fr_to_bytes;
-use lb_http_api_common::settings::AxumBackendSettings;
 use lb_key_management_system_service::{
-    backend::preload::{KeyId, PreloadKMSBackendSettings},
+    backend::preload::KeyId,
     keys::{Ed25519Key, Key, ZkKey, ZkPublicKey, secured_key::SecuredKey as _},
 };
-use lb_libp2p::{IdentifySettings, KademliaSettings, Multiaddr, NatSettings, cryptarchia_sync};
-use lb_sdp_service::{SdpSettings, wallet::SdpWalletConfig};
-use lb_storage_service::backends::rocksdb::RocksBackendSettings;
-use lb_time_service::backends::{NtpTimeBackendSettings, ntp::async_client::NTPClientSettings};
-use lb_tracing_service::TracingSettings;
-use lb_wallet_service::WalletServiceSettings;
+use libp2p::Multiaddr;
 use num_bigint::BigUint;
 use rand::rngs::OsRng;
 
 use crate::{
     UserConfig,
     config::{
-        InitArgs,
-        blend::serde::{
-            Config as BlendConfig,
-            core::{BackendConfig as BlendCoreBackendConfig, Config as BlendCoreConfig},
-            edge::{BackendConfig as BlendEdgeBackendConfig, Config as BlendEdgeConfig},
-        },
+        ApiConfig, InitArgs, KmsConfig, SdpConfig, StorageConfig, TracingConfig, WalletConfig,
+        blend::serde::{Config as BlendConfig, RequiredValues as BlendConfigRequiredValues},
         cryptarchia::serde::{
-            Config as CryptarchiaConfig, LeaderConfig, NetworkConfig as CryptarchiaNetworkConfig,
-            ServiceConfig as CryptarchiaServiceConfig,
+            Config as CryptarchiaConfig, RequiredValues as CryptarchiaConfigRequiredValues,
         },
         mempool::serde::Config as MempoolConfig,
-        network::serde::{BackendSettings, Config as NetworkConfig, SwarmConfig},
+        network::serde::{Config as NetworkConfig, nat},
+        sdp::serde::RequiredValues as SdpRequiredValues,
         time::serde::Config as TimeConfig,
+        wallet::serde::RequiredValues as WalletConfigRequiredValues,
     },
 };
 
@@ -121,10 +101,6 @@ pub fn run(args: &InitArgs) -> Result<()> {
     Ok(())
 }
 
-#[expect(
-    clippy::too_many_lines,
-    reason = "Single struct literal assembling all config fields."
-)]
 fn build_user_config(
     args: &InitArgs,
     network_key: lb_libp2p::ed25519::SecretKey,
@@ -144,132 +120,83 @@ fn build_user_config(
         funding_pk,
     } = keys;
 
-    UserConfig {
-        network: NetworkConfig {
-            backend: BackendSettings {
-                swarm: SwarmConfig {
-                    host: Ipv4Addr::UNSPECIFIED,
-                    port: args.net_port,
-                    node_key: network_key,
-                    gossipsub_config: lb_libp2p::gossipsub::Config::default(),
-                    kademlia_config: KademliaSettings::default(),
-                    identify_config: IdentifySettings::default(),
-                    chain_sync_config: cryptarchia_sync::Config::default(),
-                    nat_config: args.external_address.as_ref().map_or_else(
-                        NatSettings::default,
-                        |addr| NatSettings::Static {
-                            external_address: addr.clone(),
-                        },
-                    ),
-                },
-                initial_peers: args.initial_peers.clone(),
-            },
-        },
-        blend: BlendConfig {
+    let network_config = {
+        let mut base_config = NetworkConfig::default();
+        base_config.backend.swarm.port = args.net_port;
+        base_config.backend.swarm.node_key = network_key;
+        base_config
+            .backend
+            .initial_peers
+            .clone_from(&args.initial_peers);
+        base_config.backend.swarm.nat =
+            args.external_address
+                .as_ref()
+                .map_or_else(nat::Config::default, |addr| nat::Config::Static {
+                    external_address: addr.clone(),
+                });
+        base_config
+    };
+
+    let blend_config = {
+        let mut base_config = BlendConfig::with_required_values(BlendConfigRequiredValues {
             non_ephemeral_signing_key_id: blend_signing_key_id.clone(),
-            recovery_path_prefix: "./recovery/blend".into(),
-            core: BlendCoreConfig {
-                backend: BlendCoreBackendConfig {
-                    listening_address: blend_listening_address,
-                    core_peering_degree: 1..=3,
-                    edge_node_connection_timeout: Duration::from_secs(5),
-                    max_edge_node_incoming_connections: 300,
-                    max_dial_attempts_per_peer: NonZeroU64::new(3)
-                        .expect("Max dial attempts per peer cannot be zero."),
-                },
-                zk: ZkSettings {
-                    secret_key_kms_id: blend_zk_key_id.clone(),
-                },
-            },
-            edge: BlendEdgeConfig {
-                backend: BlendEdgeBackendConfig {
-                    max_dial_attempts_per_peer_per_message: NonZeroU64::new(3)
-                        .expect("cannot be zero"),
-                    replication_factor: NonZeroU64::new(1).expect("cannot be zero"),
-                },
-            },
-        },
-        cryptarchia: CryptarchiaConfig {
-            service: CryptarchiaServiceConfig {
-                recovery_file: "./recovery/cryptarchia.json".into(),
-                bootstrap: lb_chain_service::BootstrapConfig {
-                    prolonged_bootstrap_period: Duration::from_secs(60),
-                    force_bootstrap: false,
-                    offline_grace_period: OfflineGracePeriodConfig::default(),
-                },
-            },
-            network: CryptarchiaNetworkConfig {
-                bootstrap: lb_chain_network_service::BootstrapConfig {
-                    ibd: IbdConfig {
-                        peers: HashSet::new(),
-                        delay_before_new_download: Duration::from_secs(10),
-                    },
-                },
-                sync: SyncConfig {
-                    orphan: OrphanConfig {
-                        max_orphan_cache_size: std::num::NonZeroUsize::new(5)
-                            .expect("Max orphan cache size must be non-zero"),
-                    },
-                },
-            },
-            leader: LeaderConfig {
-                wallet: LeaderWalletConfig {
-                    max_tx_fee: Value::MAX,
-                    funding_pk,
-                },
-            },
-        },
-        time: TimeConfig {
-            backend: NtpTimeBackendSettings {
-                ntp_server: "pool.ntp.org:123".to_owned(),
-                ntp_client_settings: NTPClientSettings {
-                    timeout: Duration::from_secs(5),
-                    listening_interface: IpAddr::V4(Ipv4Addr::UNSPECIFIED),
-                },
-                update_interval: Duration::from_secs(16),
-            },
-        },
-        mempool: MempoolConfig {
-            recovery_path: "./recovery/mempool.json".into(),
-        },
-        tracing: TracingSettings::default(),
-        sdp: SdpSettings {
-            declaration: None,
-            wallet_config: SdpWalletConfig {
-                max_tx_fee: Value::MAX,
-                funding_pk,
-            },
-        },
-        http: ApiServiceSettings {
-            backend_settings: AxumBackendSettings {
-                address: args.http_addr,
-                ..AxumBackendSettings::default()
-            },
-        },
-        storage: RocksBackendSettings {
-            db_path: "./db".into(),
-            read_only: false,
-            column_family: Some("blocks".into()),
-        },
-        key_management: PreloadKMSBackendSettings {
-            keys: HashMap::from([
-                (blend_signing_key_id, blend_signing_key.into()),
-                (blend_zk_key_id, blend_zk_key.into()),
-                (leader_key_id.clone(), leader_key.into()),
-                (funding_key_id.clone(), funding_key.into()),
-            ]),
-        },
-        wallet: WalletServiceSettings {
-            known_keys: HashMap::from([
-                (leader_key_id.clone(), leader_pk),
-                (funding_key_id, funding_pk),
-            ]),
-            voucher_master_key_id: leader_key_id,
-            recovery_path: "./recovery/wallet.json".into(),
-        },
-        #[cfg(feature = "testing")]
-        testing_http: ApiServiceSettings {
-            backend_settings: AxumBackendSettings::default(),
-        },
+            secret_key_kms_id: blend_zk_key_id.clone(),
+        });
+        base_config.set_listening_address(blend_listening_address);
+        base_config
+    };
+
+    let cryptarchia_config =
+        CryptarchiaConfig::with_required_values(CryptarchiaConfigRequiredValues { funding_pk });
+
+    let time_config = TimeConfig::default();
+
+    let mempool_config = MempoolConfig::default();
+
+    let tracing_config = TracingConfig::default();
+
+    let sdp_config = SdpConfig::with_required_values(SdpRequiredValues { funding_pk });
+
+    let api_config = {
+        let mut base_config = ApiConfig::default();
+        base_config.backend.listen_address = args.http_addr;
+        base_config
+    };
+
+    let storage_config = StorageConfig::default();
+
+    let kms_config = {
+        let mut base_config = KmsConfig::default();
+        base_config.backend.keys = HashMap::from([
+            (blend_signing_key_id, blend_signing_key.into()),
+            (blend_zk_key_id, blend_zk_key.into()),
+            (leader_key_id.clone(), leader_key.into()),
+            (funding_key_id.clone(), funding_key.into()),
+        ]);
+        base_config
+    };
+
+    let wallet_config = {
+        let mut base_config = WalletConfig::with_required_values(WalletConfigRequiredValues {
+            voucher_master_key_id: leader_key_id.clone(),
+        });
+        base_config.known_keys = [(leader_key_id, leader_pk), (funding_key_id, funding_pk)]
+            .into_iter()
+            .collect();
+        base_config
+    };
+
+    UserConfig {
+        network: network_config,
+        blend: blend_config,
+        cryptarchia: cryptarchia_config,
+        time: time_config,
+        mempool: mempool_config,
+        tracing: tracing_config,
+        sdp: sdp_config,
+        api: api_config,
+        storage: storage_config,
+        kms: kms_config,
+        wallet: wallet_config,
     }
 }

@@ -88,7 +88,7 @@ async fn test_spawn_nodes_and_faucet() {
         .arg("--node-base-url")
         .arg(format!(
             "http://{}",
-            user_configs[0].1.http.backend_settings.address
+            user_configs[0].1.api.backend.listen_address
         ))
         .arg("--drip-amount")
         .arg("1000")

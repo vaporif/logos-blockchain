@@ -9,6 +9,7 @@ use lb_core::{
 };
 use lb_key_management_system_service::keys::ZkKey;
 use lb_libp2p::{Multiaddr, multiaddr};
+use lb_node::config::{TracingConfig, network::serde as network, tracing::serde as tracing};
 use lb_tests::topology::configs::{
     GeneralConfig,
     api::GeneralApiConfig,
@@ -21,7 +22,6 @@ use lb_tests::topology::configs::{
     time::default_time_config,
     tracing::GeneralTracingConfig,
 };
-use lb_tracing_service::{LoggerLayer, MetricsLayer, TracingLayer, TracingSettings};
 use rand::{Rng as _, thread_rng};
 
 use crate::{
@@ -34,7 +34,7 @@ type FaucetNotes = Vec<ZkKey>;
 #[must_use]
 pub fn create_node_configs(
     faucet_settings: &FaucetSettings,
-    tracing_settings: &TracingSettings,
+    tracing_settings: &TracingConfig,
     hosts: Vec<Host>,
 ) -> (HashMap<Host, GeneralConfig>, GenesisTx) {
     let mut ids = Vec::with_capacity(hosts.len());
@@ -91,7 +91,7 @@ pub fn create_node_configs(
             .backend
             .initial_peers
             .clone_from(&host_network_init_peers);
-        network_config.backend.swarm.nat_config = lb_libp2p::NatSettings::Static {
+        network_config.backend.swarm.nat = network::nat::Config::Static {
             external_address: Multiaddr::from_str(&format!(
                 "/ip4/{}/udp/{}/quic-v1",
                 host.ip, host.network_port
@@ -125,7 +125,7 @@ pub fn create_node_configs(
 
 #[must_use]
 pub fn create_node_config_from_template(
-    tracing_settings: &TracingSettings,
+    tracing_settings: &TracingConfig,
     new_host: &Host,
     template: &GeneralConfig,
 ) -> GeneralConfig {
@@ -152,7 +152,7 @@ pub fn create_node_config_from_template(
         .initial_peers
         .clone_from(&template.network_config.backend.initial_peers);
 
-    network_config.backend.swarm.nat_config = lb_libp2p::NatSettings::Static {
+    network_config.backend.swarm.nat = network::nat::Config::Static {
         external_address: Multiaddr::from_str(&format!(
             "/ip4/{}/udp/{}/quic-v1",
             new_host.ip, new_host.network_port
@@ -207,33 +207,30 @@ fn update_network_init_peers(hosts: &[Host]) -> Vec<Multiaddr> {
         .collect()
 }
 
-fn update_tracing_identifier(
-    settings: TracingSettings,
-    identifier: String,
-) -> GeneralTracingConfig {
+fn update_tracing_identifier(settings: TracingConfig, identifier: String) -> GeneralTracingConfig {
     GeneralTracingConfig {
-        tracing_settings: TracingSettings {
+        tracing_settings: TracingConfig {
             logger: match settings.logger {
-                LoggerLayer::Loki(mut config) => {
+                tracing::logger::Layer::Loki(mut config) => {
                     config.host_identifier.clone_from(&identifier);
-                    LoggerLayer::Loki(config)
+                    tracing::logger::Layer::Loki(config)
                 }
                 other => other,
             },
             tracing: match settings.tracing {
-                TracingLayer::Otlp(mut config) => {
+                tracing::tracing::Layer::Otlp(mut config) => {
                     config.service_name.clone_from(&identifier);
-                    TracingLayer::Otlp(config)
+                    tracing::tracing::Layer::Otlp(config)
                 }
-                other @ TracingLayer::None => other,
+                other @ tracing::tracing::Layer::None => other,
             },
             filter: settings.filter,
             metrics: match settings.metrics {
-                MetricsLayer::Otlp(mut config) => {
+                tracing::metrics::Layer::Otlp(mut config) => {
                     config.host_identifier = identifier;
-                    MetricsLayer::Otlp(config)
+                    tracing::metrics::Layer::Otlp(config)
                 }
-                other @ MetricsLayer::None => other,
+                other @ tracing::metrics::Layer::None => other,
             },
             console: settings.console,
             level: settings.level,
@@ -245,11 +242,9 @@ fn update_tracing_identifier(
 mod cfgsync_tests {
     use std::{net::Ipv4Addr, str::FromStr as _};
 
+    use ::tracing::Level;
     use lb_libp2p::{Multiaddr, Protocol};
-    use lb_tracing_service::{
-        ConsoleLayer, FilterLayer, LoggerLayer, MetricsLayer, TracingLayer, TracingSettings,
-    };
-    use tracing::Level;
+    use lb_node::config::{TracingConfig, tracing::serde as tracing};
 
     use super::{Host, create_node_configs};
     use crate::{FaucetSettings, config::create_node_config_from_template};
@@ -276,18 +271,8 @@ mod cfgsync_tests {
             })
             .collect();
 
-        let (configs, _) = create_node_configs(
-            &FaucetSettings::default(),
-            &TracingSettings {
-                logger: LoggerLayer::None,
-                tracing: TracingLayer::None,
-                filter: FilterLayer::None,
-                metrics: MetricsLayer::None,
-                console: ConsoleLayer::None,
-                level: Level::DEBUG,
-            },
-            hosts,
-        );
+        let (configs, _) =
+            create_node_configs(&FaucetSettings::default(), &TracingConfig::none(), hosts);
 
         for (host, config) in &configs {
             let network_port = config.network_config.backend.swarm.port;
@@ -300,12 +285,12 @@ mod cfgsync_tests {
 
     #[test]
     fn append_node() {
-        let tracing = TracingSettings {
-            logger: LoggerLayer::None,
-            tracing: TracingLayer::None,
-            filter: FilterLayer::None,
-            metrics: MetricsLayer::None,
-            console: ConsoleLayer::None,
+        let tracing = TracingConfig {
+            logger: tracing::logger::Layer::None,
+            tracing: tracing::tracing::Layer::None,
+            filter: tracing::filter::Layer::None,
+            metrics: tracing::metrics::Layer::None,
+            console: tracing::console::Layer::None,
             level: Level::DEBUG,
         };
 

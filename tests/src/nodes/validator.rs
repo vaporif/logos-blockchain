@@ -1,7 +1,5 @@
 use std::{
-    collections::{HashMap, HashSet},
     net::SocketAddr,
-    num::NonZeroUsize,
     process::{Child, Command, Stdio},
     str::FromStr as _,
     time::Duration,
@@ -9,38 +7,31 @@ use std::{
 
 use futures::Stream;
 use lb_chain_broadcast_service::BlockInfo;
-use lb_chain_leader_service::LeaderWalletConfig;
-use lb_chain_network_service::{IbdConfig, OrphanConfig, SyncConfig};
-use lb_chain_service::{CryptarchiaInfo, OfflineGracePeriodConfig};
+use lb_chain_service::CryptarchiaInfo;
 use lb_common_http_client::CommonHttpClient;
 use lb_core::{
     block::Block,
-    mantle::{SignedMantleTx, Transaction as _, TxHash, Value},
+    mantle::{SignedMantleTx, Transaction as _, TxHash},
     sdp::Declaration,
 };
-use lb_http_api_common::{
-    paths::{
-        CRYPTARCHIA_HEADERS, CRYPTARCHIA_INFO, MANTLE_SDP_DECLARATIONS, NETWORK_INFO, STORAGE_BLOCK,
-    },
-    settings::AxumBackendSettings,
+use lb_http_api_common::paths::{
+    CRYPTARCHIA_HEADERS, CRYPTARCHIA_INFO, MANTLE_SDP_DECLARATIONS, NETWORK_INFO, STORAGE_BLOCK,
 };
 use lb_key_management_system_service::keys::secured_key::SecuredKey as _;
 use lb_network_service::backends::libp2p::Libp2pInfo;
 use lb_node::{
-    HeaderId, RocksBackendSettings, UserConfig,
+    HeaderId, UserConfig,
     config::{
-        RunConfig,
-        cryptarchia::{self, serde::LeaderConfig},
-        deployment::DeploymentSettings,
-        mempool::serde::Config as MempoolConfig,
+        ApiConfig, CryptarchiaConfig, RunConfig, SdpConfig, StorageConfig, WalletConfig,
+        api::serde::AxumBackendSettings,
+        cryptarchia::serde::RequiredValues as CryptarchiaConfigRequiredValues,
+        deployment::DeploymentSettings, mempool::serde::Config as MempoolConfig,
+        sdp::serde::RequiredValues as SdpConfigRequiredValues, tracing::serde as tracing,
+        wallet::serde::RequiredValues as WalletConfigRequiredValues,
     },
 };
-use lb_sdp_service::SdpSettings;
-use lb_tracing::logging::local::FileConfig;
-use lb_tracing_service::LoggerLayer;
 use lb_tx_service::MempoolMetrics;
 use lb_utils::net::get_available_tcp_port;
-use lb_wallet_service::WalletServiceSettings;
 use reqwest::Url;
 use tempfile::NamedTempFile;
 use tokio::time::error::Elapsed;
@@ -109,13 +100,14 @@ impl Validator {
 
         if !*IS_DEBUG_TRACING {
             // setup logging so that we can intercept it later in testing
-            config.user.tracing.logger = LoggerLayer::File(FileConfig {
-                directory: dir.path().to_owned(),
-                prefix: Some(LOGS_PREFIX.into()),
-            });
+            config.user.tracing.logger =
+                tracing::logger::Layer::File(tracing::logger::FileConfig {
+                    directory: dir.path().to_owned(),
+                    prefix: Some(LOGS_PREFIX.into()),
+                });
         }
 
-        config.user.storage.db_path = dir.path().join("db");
+        config.user.storage.backend.path = dir.path().join("db");
 
         serde_yaml::to_writer(&mut user_config_file, &config.user).unwrap();
         serde_yaml::to_writer(&mut deployment_config_file, &config.deployment).unwrap();
@@ -130,8 +122,8 @@ impl Validator {
             .spawn()
             .unwrap();
         let node = Self {
-            addr: config.user.http.backend_settings.address,
-            testing_http_addr: config.user.testing_http.backend_settings.address,
+            addr: config.user.api.backend.listen_address,
+            testing_http_addr: config.user.api.testing.listen_address,
             child,
             tempdir: dir,
             config,
@@ -330,103 +322,90 @@ pub fn create_validator_config(
     config: GeneralConfig,
     deployment_config: DeploymentSettings,
 ) -> RunConfig {
-    let testing_http_address = format!("127.0.0.1:{}", get_available_tcp_port().unwrap())
-        .parse()
-        .unwrap();
+    let network_config = config.network_config;
 
-    let user_config = UserConfig {
-        network: config.network_config,
-        blend: config.blend_config.0,
-        time: config.time_config,
-        cryptarchia: cryptarchia::serde::Config {
-            network: cryptarchia::serde::NetworkConfig {
-                bootstrap: lb_chain_network_service::BootstrapConfig {
-                    ibd: IbdConfig {
-                        delay_before_new_download: Duration::from_secs(10),
-                        peers: HashSet::new(),
-                    },
-                },
-                sync: SyncConfig {
-                    orphan: OrphanConfig {
-                        max_orphan_cache_size: NonZeroUsize::new(5)
-                            .expect("Max orphan cache size must be non-zero"),
-                    },
-                },
-            },
-            service: cryptarchia::serde::ServiceConfig {
-                bootstrap: lb_chain_service::BootstrapConfig {
-                    force_bootstrap: false,
-                    offline_grace_period: OfflineGracePeriodConfig {
-                        grace_period: Duration::from_secs(20 * 60),
-                        state_recording_interval: Duration::from_secs(60),
-                    },
-                    prolonged_bootstrap_period: config.consensus_config.prolonged_bootstrap_period,
-                },
-                recovery_file: "./recovery/cryptarchia.json".into(),
-            },
-            leader: LeaderConfig {
-                wallet: LeaderWalletConfig {
-                    max_tx_fee: Value::MAX,
-                    // We use the same funding key used for SDP.
-                    funding_pk: config.consensus_config.funding_pk,
-                },
-            },
+    let blend_config = config.blend_config.0;
+
+    let time_config = config.time_config;
+
+    let cryptarchia_config = {
+        let mut base_config =
+            CryptarchiaConfig::with_required_values(CryptarchiaConfigRequiredValues {
+                // We use the same funding key used for SDP.
+                funding_pk: config.consensus_config.funding_pk,
+            });
+        base_config.service.bootstrap.prolonged_bootstrap_period =
+            config.consensus_config.prolonged_bootstrap_period;
+        base_config
+    };
+
+    let mempool_config = MempoolConfig::default();
+
+    let tracing_config = config.tracing_config.tracing_settings;
+
+    let api_config = ApiConfig {
+        backend: AxumBackendSettings {
+            listen_address: config.api_config.address,
+            max_concurrent_requests: 1000,
+            ..Default::default()
         },
-        mempool: MempoolConfig {
-            recovery_path: "./recovery/mempool.json".into(),
+        testing: AxumBackendSettings {
+            listen_address: format!("127.0.0.1:{}", get_available_tcp_port().unwrap())
+                .parse()
+                .unwrap(),
+            max_concurrent_requests: 1000,
+            ..Default::default()
         },
-        tracing: config.tracing_config.tracing_settings,
-        http: lb_api_service::ApiServiceSettings {
-            backend_settings: AxumBackendSettings {
-                address: config.api_config.address,
-                max_concurrent_requests: 1000,
-                ..Default::default()
-            },
-        },
-        storage: RocksBackendSettings {
-            db_path: "./db".into(),
-            read_only: false,
-            column_family: Some("blocks".into()),
-        },
-        sdp: SdpSettings {
-            declaration: None,
-            wallet_config: lb_sdp_service::wallet::SdpWalletConfig {
-                max_tx_fee: Value::MAX,
-                funding_pk: config.consensus_config.funding_sk.as_public_key(),
-            },
-        },
-        wallet: WalletServiceSettings {
-            known_keys: [
-                (
-                    key_id_for_preload_backend(&config.consensus_config.known_key.clone().into()),
-                    config.consensus_config.known_key.as_public_key(),
-                ),
-                (
-                    key_id_for_preload_backend(&config.consensus_config.funding_sk.clone().into()),
-                    config.consensus_config.funding_sk.as_public_key(),
-                ),
-            ]
-            .into_iter()
-            .chain(config.consensus_config.other_keys.iter().map(|sk| {
-                (
-                    key_id_for_preload_backend(&sk.clone().into()),
-                    sk.as_public_key(),
-                )
-            }))
-            .collect::<HashMap<_, _>>(),
+    };
+
+    let storage_config = StorageConfig::default();
+
+    let sdp_config = SdpConfig::with_required_values(SdpConfigRequiredValues {
+        funding_pk: config.consensus_config.funding_sk.as_public_key(),
+    });
+
+    let wallet_config = {
+        let mut base_config = WalletConfig::with_required_values(WalletConfigRequiredValues {
             voucher_master_key_id: key_id_for_preload_backend(
                 &config.consensus_config.known_key.clone().into(),
             ),
-            recovery_path: "./recovery/wallet.json".into(),
-        },
-        key_management: config.kms_config,
-        testing_http: lb_api_service::ApiServiceSettings {
-            backend_settings: AxumBackendSettings {
-                address: testing_http_address,
-                max_concurrent_requests: 1000,
-                ..Default::default()
-            },
-        },
+        });
+        base_config.known_keys = [
+            (
+                key_id_for_preload_backend(&config.consensus_config.known_key.clone().into()),
+                config.consensus_config.known_key.as_public_key(),
+            ),
+            (
+                key_id_for_preload_backend(&config.consensus_config.funding_sk.clone().into()),
+                config.consensus_config.funding_sk.as_public_key(),
+            ),
+        ]
+        .into_iter()
+        .chain(config.consensus_config.other_keys.iter().map(|sk| {
+            (
+                key_id_for_preload_backend(&sk.clone().into()),
+                sk.as_public_key(),
+            )
+        }))
+        .collect();
+
+        base_config
+    };
+
+    let kms_config = config.kms_config;
+
+    let user_config = UserConfig {
+        network: network_config,
+        blend: blend_config,
+        time: time_config,
+        cryptarchia: cryptarchia_config,
+        mempool: mempool_config,
+        tracing: tracing_config,
+        api: api_config,
+        storage: storage_config,
+        sdp: sdp_config,
+        wallet: wallet_config,
+        kms: kms_config,
     };
 
     RunConfig {
