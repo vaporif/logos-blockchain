@@ -59,7 +59,7 @@ services:
     ports:
       - "3000:3000/udp"
       - "3400:3400/udp"
-      - "18085:18085/tcp"
+      - "18080:18080/tcp"
     entrypoint: /etc/logos-blockchain/scripts/run_node.sh
 
   logos-blockchain-node-1:
@@ -127,7 +127,6 @@ services:
     image: ghcr.io/logos-blockchain/logos-blockchain:devnet
     ports:
       - "13000:13000"
-      - "18080:18080"
     depends_on:
       - cfgsync
       - explorer
