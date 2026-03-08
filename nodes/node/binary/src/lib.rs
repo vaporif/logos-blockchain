@@ -1,7 +1,10 @@
 pub mod api;
 pub mod config;
 pub mod generic_services;
+#[cfg(feature = "config-gen")]
+pub mod init;
 
+use cfg_if::cfg_if;
 use color_eyre::eyre::{Result, eyre};
 pub use lb_blend_service::{
     core::{
@@ -37,13 +40,15 @@ use overwatch::{
     overwatch::{Error as OverwatchError, Overwatch, OverwatchRunner},
 };
 
-pub use crate::config::{HttpArgs, LogArgs, NetworkArgs, UserConfig};
+pub use crate::config::{ApiArgs, Command, LogArgs, NetworkArgs, UserConfig};
 use crate::{
     api::backend::AxumBackend,
     config::{
-        RunConfig, blend::ServiceConfig as BlendConfig,
-        cryptarchia::ServiceConfig as CryptarchiaConfig, mempool::ServiceConfig as MempoolConfig,
-        network::ServiceConfig as NetworkConfig, time::ServiceConfig as TimeConfig,
+        RunConfig, api::ServiceConfig as ApiConfig, blend::ServiceConfig as BlendConfig,
+        cryptarchia::ServiceConfig as CryptarchiaConfig, kms::ServiceConfig as KmsConfig,
+        mempool::ServiceConfig as MempoolConfig, network::ServiceConfig as NetworkConfig,
+        sdp::ServiceConfig as SdpConfig, storage::ServiceConfig as StorageConfig,
+        time::ServiceConfig as TimeConfig, wallet::ServiceConfig as WalletConfig,
     },
     generic_services::{SdpMempoolAdapter, SdpService, SdpWalletAdapter},
 };
@@ -74,8 +79,12 @@ pub(crate) type CryptarchiaService = generic_services::CryptarchiaService<Runtim
 
 pub(crate) type ChainNetworkService = generic_services::ChainNetworkService<RuntimeServiceId>;
 
-pub(crate) type CryptarchiaLeaderService =
-    generic_services::CryptarchiaLeaderService<CryptarchiaService, WalletService, RuntimeServiceId>;
+pub(crate) type CryptarchiaLeaderService = generic_services::CryptarchiaLeaderService<
+    CryptarchiaService,
+    ChainNetworkService,
+    WalletService,
+    RuntimeServiceId,
+>;
 
 pub type TimeService = generic_services::TimeService<RuntimeServiceId>;
 
@@ -89,6 +98,7 @@ pub type ApiService = lb_api_service::ApiService<
         RocksStorageAdapter<SignedMantleTx, TxHash>,
         SdpMempoolAdapter<RuntimeServiceId>,
         SdpWalletAdapter<RuntimeServiceId>,
+        CryptarchiaLeaderService,
     >,
     RuntimeServiceId,
 >;
@@ -103,8 +113,6 @@ type TestingApiService<RuntimeServiceId> =
 
 #[derive_services]
 pub struct LogosBlockchain {
-    #[cfg(feature = "tracing")]
-    tracing: TracingService,
     network: NetworkService,
     blend: BlendService,
     blend_core: BlendCoreService,
@@ -121,11 +129,27 @@ pub struct LogosBlockchain {
     system_sig: SystemSigService,
     key_management: KeyManagementService,
     wallet: WalletService,
+
     #[cfg(feature = "testing")]
     testing_http: TestingApiService<RuntimeServiceId>,
+
+    #[cfg(feature = "tracing")]
+    tracing: TracingService,
 }
 
 pub fn run_node_from_config(config: RunConfig) -> Result<Overwatch<RuntimeServiceId>, DynError> {
+    let blend_rewards_params = config.deployment.blend_reward_params();
+
+    let (blend_config, blend_core_config, blend_edge_config) = BlendConfig {
+        user: config.user.blend,
+        deployment: config.deployment.blend,
+    }
+    .into_blend_services_settings(
+        &config.user.state,
+        &config.deployment.time,
+        &config.deployment.cryptarchia,
+    );
+
     let time_service_config = TimeConfig {
         user: config.user.time,
         deployment: config.deployment.time,
@@ -136,46 +160,81 @@ pub fn run_node_from_config(config: RunConfig) -> Result<Overwatch<RuntimeServic
         user: config.user.cryptarchia,
         deployment: config.deployment.cryptarchia,
     }
-    .into_cryptarchia_services_settings(&config.deployment.blend);
-
-    let (blend_config, blend_core_config, blend_edge_config) = BlendConfig {
-        user: config.user.blend,
-        deployment: config.deployment.blend,
-    }
-    .into();
+    .into_cryptarchia_services_settings(blend_rewards_params, &config.user.state);
 
     let mempool_service_config = MempoolConfig {
-        user: config.user.mempool,
         deployment: config.deployment.mempool,
     }
+    .into_mempool_service_settings(&config.user.state);
+
+    let network_service_config = NetworkConfig {
+        user: config.user.network,
+        deployment: config.deployment.network,
+    }
     .into();
+
+    let wallet_config = WalletConfig {
+        user: config.user.wallet,
+    }
+    .into_wallet_service_settings(&config.user.state);
+
+    let storage_config = StorageConfig {
+        user: config.user.storage,
+    }
+    .into_rocks_backend_settings(&config.user.state);
+
+    let kms_config = KmsConfig {
+        user: config.user.kms,
+    }
+    .into();
+
+    let sdp_config = SdpConfig {
+        user: config.user.sdp,
+    }
+    .into();
+
+    #[cfg(feature = "tracing")]
+    let tracing_config = config::tracing::ServiceConfig {
+        user: config.user.tracing,
+    }
+    .into();
+
+    let api_config = ApiConfig {
+        user: config.user.api,
+    };
+
+    cfg_if! {
+        if #[cfg(feature = "testing")] {
+            let (http_config, testing_config) = api_config.into_backend_and_testing_settings();
+        } else {
+            let http_config = api_config.into_backend_settings();
+        }
+    }
 
     let app = OverwatchRunner::<LogosBlockchain>::run(
         LogosBlockchainServiceSettings {
-            network: NetworkConfig {
-                user: config.user.network,
-                deployment: config.deployment.network,
-            }
-            .into(),
+            network: network_service_config,
             blend: blend_config,
             blend_core: blend_core_config,
             blend_edge: blend_edge_config,
             block_broadcast: (),
-            #[cfg(feature = "tracing")]
-            tracing: config.user.tracing,
-            http: config.user.http,
             mempool: mempool_service_config,
             cryptarchia: chain_service_config,
             chain_network: chain_network_config,
             cryptarchia_leader: chain_leader_config,
             time: time_service_config,
-            storage: config.user.storage,
+            http: http_config,
+            storage: storage_config,
             system_sig: (),
-            key_management: config.user.key_management,
-            sdp: config.user.sdp,
-            wallet: config.user.wallet,
+            key_management: kms_config,
+            sdp: sdp_config,
+            wallet: wallet_config,
+
+            #[cfg(feature = "tracing")]
+            tracing: tracing_config,
+
             #[cfg(feature = "testing")]
-            testing_http: config.user.testing_http,
+            testing_http: testing_config,
         },
         None,
     )

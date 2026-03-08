@@ -46,6 +46,7 @@ LABEL maintainer="augustinas@status.im" \
 
 RUN apt-get update && apt-get install -yq \
     libstdc++6 libssl3 ca-certificates nginx \
+    python3 python3-pip curl git \
     && rm -rf /var/lib/apt/lists/*
 
 # Copy Circuits
@@ -54,15 +55,18 @@ ENV LOGOS_BLOCKCHAIN_CIRCUITS=/opt/circuits
 
 # Copy Binaries
 COPY --from=builder /logos-blockchain/target/release/logos-blockchain-node /usr/bin/
-COPY --from=builder /logos-blockchain/target/release/logos-blockchain-cli /usr/bin/
 COPY --from=builder /logos-blockchain/target/release/logos-blockchain-cfgsync-server /usr/bin/
 COPY --from=builder /logos-blockchain/target/release/logos-blockchain-cfgsync-client /usr/bin/
 COPY --from=builder /logos-blockchain/target/release/logos-blockchain-demo-sequencer /usr/bin/
 COPY --from=builder /logos-blockchain/target/release/logos-blockchain-demo-archiver /usr/bin/
+COPY --from=builder /logos-blockchain/target/release/logos-blockchain-faucet /usr/bin/
 
 # Copy Frontend & Nginx config
 COPY --from=builder /logos-blockchain/testnet/l2-sequencer-archival-demo/webapp/dist /var/www/l2-demo
 COPY --from=builder /logos-blockchain/testnet/l2-sequencer-archival-demo/nginx/nginx.conf /etc/nginx/nginx.conf
 
-EXPOSE 80 3000 8080 8090 9000 18080 60000
+# Copy Scripts
+COPY --from=builder /logos-blockchain/testnet/scripts /opt/scripts
+
+EXPOSE 80 3000 8000 8080 8090 9000 18080 60000
 ENTRYPOINT ["/usr/bin/logos-blockchain-node"]

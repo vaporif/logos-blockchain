@@ -1,32 +1,14 @@
 use core::time::Duration;
 
+use lb_utils::bounded_duration::{MinimalBoundedDuration, SECOND};
 use serde::{Deserialize, Serialize};
 use serde_with::serde_as;
+use time::OffsetDateTime;
 
-use crate::config::deployment::WellKnownDeployment;
-
-#[derive(Serialize, Deserialize, Debug, Clone)]
 #[serde_as]
+#[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct Settings {
-    #[serde_as(as = "lb_utils::bounded_duration::MinimalBoundedDuration<1, SECOND>")]
+    #[serde_as(as = "MinimalBoundedDuration<1, SECOND>")]
     pub slot_duration: Duration,
-}
-
-impl From<WellKnownDeployment> for Settings {
-    fn from(value: WellKnownDeployment) -> Self {
-        match value {
-            WellKnownDeployment::Mainnet => mainnet_settings(),
-            WellKnownDeployment::Testnet => testnet_settings(),
-        }
-    }
-}
-
-const fn mainnet_settings() -> Settings {
-    Settings {
-        slot_duration: Duration::from_secs(1),
-    }
-}
-
-const fn testnet_settings() -> Settings {
-    mainnet_settings()
+    pub chain_start_time: OffsetDateTime,
 }

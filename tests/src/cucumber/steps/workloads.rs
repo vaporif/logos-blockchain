@@ -1,6 +1,6 @@
 use cucumber::given;
 
-use crate::cucumber::world::{CucumberWorld, StepResult};
+use crate::cucumber::{error::StepResult, world::CucumberWorld};
 
 #[given(expr = "wallets total funds is {int} split across {int} users")]
 fn wallets_total_funds(world: &mut CucumberWorld, total_funds: u64, users: usize) -> StepResult {
@@ -23,8 +23,8 @@ fn tx_rate_with_users(world: &mut CucumberWorld, rate: u64, users: usize) -> Ste
 }
 
 #[given(expr = "expect consensus liveness")]
-const fn expect_consensus_liveness(world: &mut CucumberWorld) -> StepResult {
-    world.enable_consensus_liveness()
+const fn expect_consensus_liveness(world: &mut CucumberWorld) {
+    world.enable_consensus_liveness();
 }
 
 #[given(expr = "consensus liveness lag allowance is {int}")]

@@ -1,5 +1,6 @@
 pub mod api;
 mod bootstrap;
+mod notifier;
 mod relays;
 mod states;
 pub mod storage;
@@ -22,8 +23,7 @@ use lb_core::{
     block::Block,
     header::HeaderId,
     mantle::{
-        AuthenticatedMantleTx, Transaction, TxHash, gas::MainnetGasConstants,
-        genesis_tx::GenesisTx, ops::leader_claim::VoucherCm,
+        AuthenticatedMantleTx, Transaction, TxHash, gas::MainnetGasConstants, genesis_tx::GenesisTx,
     },
     sdp::{Declaration, DeclarationId, ProviderId, ProviderInfo, ServiceType},
 };
@@ -49,7 +49,7 @@ use serde_with::serde_as;
 use strum::IntoEnumIterator as _;
 use thiserror::Error;
 use tokio::{
-    sync::{broadcast, mpsc, oneshot},
+    sync::{broadcast, mpsc, oneshot, watch},
     time::Instant,
 };
 use tracing::{Level, debug, error, info, instrument, span, warn};
@@ -58,6 +58,7 @@ use tracing_futures::Instrument as _;
 pub use crate::bootstrap::config::{BootstrapConfig, OfflineGracePeriodConfig};
 use crate::{
     bootstrap::state::choose_engine_state,
+    notifier::ChainOnlineNotifier,
     relays::CryptarchiaConsensusRelays,
     states::CryptarchiaConsensusState,
     storage::{StorageAdapter as _, adapters::StorageAdapter},
@@ -66,9 +67,9 @@ use crate::{
 
 // Limit the number of blocks returned by GetHeaders
 const HEADERS_LIMIT: usize = 512;
-const CRYPTARCHIA_ID: &str = "Cryptarchia";
+const SERVICE_ID: &str = "Chain";
 
-pub(crate) const LOG_TARGET: &str = "cryptarchia::service";
+pub(crate) const LOG_TARGET: &str = "chain::service";
 
 #[derive(Debug, Error)]
 pub enum Error {
@@ -125,7 +126,7 @@ pub enum ConsensusMsg<Tx> {
     },
     GetEpochState {
         slot: Slot,
-        tx: oneshot::Sender<Option<EpochState>>,
+        tx: oneshot::Sender<Result<EpochState, Error>>,
     },
     /// Apply a block to the chain,
     /// and return the tip and reorged txs if successful.
@@ -141,6 +142,13 @@ pub enum ConsensusMsg<Tx> {
     /// completed. Chain-service should start the prolonged bootstrap timer
     /// upon receiving this.
     IbdCompleted,
+    /// Subscribe to be notified when the chain becomes online mode.
+    /// Since chain never goes back after entering online,
+    /// the notification is delivered at most once.
+    /// Late subscribers are notified immediately.
+    SubscribeChainOnline {
+        sender: oneshot::Sender<watch::Receiver<bool>>,
+    },
 }
 
 #[serde_as]
@@ -211,12 +219,16 @@ impl Cryptarchia {
         genesis_id: HeaderId,
         ledger_config: lb_ledger::Config,
         state: lb_cryptarchia_engine::State,
+        lib_slot: Slot,
+        lib_length: u64,
     ) -> Self {
         Self {
             consensus: <lb_cryptarchia_engine::Cryptarchia<_>>::from_lib(
                 lib_id,
-                ledger_config.consensus_config,
+                ledger_config.consensus_config.clone(),
                 state,
+                lib_slot,
+                lib_length,
             ),
             ledger: <lb_ledger::Ledger<_>>::new(lib_id, lib_ledger_state, ledger_config),
             genesis_id,
@@ -281,7 +293,6 @@ impl Cryptarchia {
                 parent,
                 slot,
                 header.leader_proof(),
-                VoucherCm::default(), // TODO: add the new voucher commitment here
                 block.transactions(),
             )
             .map_err(|err| match err {
@@ -317,10 +328,10 @@ impl Cryptarchia {
         Ok((cryptarchia, pruned_blocks, reorged_blocks))
     }
 
-    fn epoch_state_for_slot(&self, slot: Slot) -> Option<EpochState> {
+    fn epoch_state_for_slot(&self, slot: Slot) -> Result<EpochState, Error> {
         let tip = self.tip();
         let state = self.ledger.state(&tip).expect("no state for tip");
-        state.epoch_state_for_slot(slot, self.ledger.config())
+        Ok(state.epoch_state_for_slot(slot, self.ledger.config())?)
     }
 
     /// Remove the ledger states associated with blocks that have been pruned by
@@ -415,6 +426,12 @@ pub enum StartingState {
         lib_ledger_state: Box<LedgerState>,
         genesis_id: HeaderId,
     },
+}
+
+impl From<GenesisTx> for StartingState {
+    fn from(value: GenesisTx) -> Self {
+        Self::Genesis { genesis_tx: value }
+    }
 }
 
 impl FileBackendSettings for CryptarchiaSettings {
@@ -525,7 +542,6 @@ where
 
         let (mut current_slot, mut slot_timer) = Self::get_slot_timer(&relays).await?;
 
-        // TODO: check active slot coeff is exactly 1/30
         let (mut cryptarchia, pruned_blocks) = self
             .initialize_cryptarchia(
                 &bootstrap_config,
@@ -558,8 +574,10 @@ where
                 .state_recording_interval,
         );
 
+        let chain_online_notifier = ChainOnlineNotifier::new(*cryptarchia.state());
+
         // Mark the service as ready. The service is operational and can handle requests
-        // even while in bootstrap mode waiting for IBD to complete.
+        // even while in bootstrap mode waiting for IBD+PBP to complete.
         self.notify_service_ready();
 
         let async_loop = async {
@@ -571,6 +589,7 @@ where
                             cryptarchia,
                             &storage_blocks_to_remove,
                             relays.storage_adapter(),
+                            &chain_online_notifier,
                         ).await;
                         Self::update_state(
                             &cryptarchia,
@@ -625,7 +644,7 @@ where
                                 }
                             }
                             msg => {
-                                Self::process_message(&cryptarchia, &self.new_block_subscription_sender, &self.lib_subscription_sender, msg);
+                                Self::process_message(&cryptarchia, &self.new_block_subscription_sender, &self.lib_subscription_sender, &chain_online_notifier, msg);
                             }
                         }
                     }
@@ -646,16 +665,14 @@ where
             }
         };
 
-        // It sucks to use `CRYPTARCHIA_ID` when we have `<RuntimeServiceId as
+        // It sucks to use `SERVICE_ID` when we have `<RuntimeServiceId as
         // AsServiceId<Self>>::SERVICE_ID`.
         // Somehow it just does not let us use it.
         //
         // Hypothesis:
         // 1. Probably related to too many generics.
         // 2. It seems `span` requires a `const` string literal.
-        async_loop
-            .instrument(span!(Level::TRACE, CRYPTARCHIA_ID))
-            .await;
+        async_loop.instrument(span!(Level::TRACE, SERVICE_ID)).await;
 
         Ok(())
     }
@@ -722,6 +739,7 @@ where
         cryptarchia: &Cryptarchia,
         new_block_channel: &broadcast::Sender<ProcessedBlockEvent>,
         lib_channel: &broadcast::Sender<LibUpdate>,
+        chain_online_notifier: &ChainOnlineNotifier,
         msg: ConsensusMsg<Tx>,
     ) {
         match msg {
@@ -785,8 +803,8 @@ where
                 });
             }
             ConsensusMsg::GetEpochState { slot, tx } => {
-                let epoch_state = cryptarchia.epoch_state_for_slot(slot);
-                tx.send(epoch_state).unwrap_or_else(|_| {
+                let result = cryptarchia.epoch_state_for_slot(slot);
+                tx.send(result).unwrap_or_else(|_| {
                     error!("Could not send epoch state through channel");
                 });
             }
@@ -807,6 +825,13 @@ where
                 // the prolonged_bootstrap_timer. This should never be reached since we filter
                 // it out before calling process_message
                 panic!("IbdCompleted should be handled in the run loop, not in process_message");
+            }
+            ConsensusMsg::SubscribeChainOnline { sender } => {
+                sender
+                    .send(chain_online_notifier.subscribe())
+                    .unwrap_or_else(|_| {
+                        error!("Could not subscribe to new block channel");
+                    });
             }
         }
     }
@@ -878,8 +903,7 @@ where
         new_block_subscription_sender: &broadcast::Sender<ProcessedBlockEvent>,
         lib_broadcaster: &broadcast::Sender<LibUpdate>,
     ) -> Result<(Cryptarchia, PrunedBlocks<HeaderId>, Vec<Tx>), Error> {
-        debug!("received proposal {:?}", block);
-
+        debug!("Received proposal with ID: {:?}", block.header().id());
         let header = block.header();
         let prev_lib = cryptarchia.lib();
 
@@ -901,12 +925,14 @@ where
             .await
             .map_err(|e| Error::Storage(format!("Failed to store block: {e}")))?;
 
-        let immutable_blocks = pruned_blocks.immutable_blocks().clone();
-        relays
-            .storage_adapter()
-            .store_immutable_block_ids(immutable_blocks)
-            .await
-            .map_err(|e| Error::Storage(format!("Failed to store immutable block ids: {e}")))?;
+        Self::store_immutable_blocks_index(
+            &pruned_blocks,
+            Some(prev_lib),
+            new_lib,
+            cryptarchia.consensus.lib_branch().slot(),
+            relays.storage_adapter(),
+        )
+        .await?;
 
         let processed_block_event = ProcessedBlockEvent {
             block_id: header.id(),
@@ -965,6 +991,29 @@ where
         .collect();
 
         Ok((cryptarchia, pruned_blocks, reorged_txs))
+    }
+
+    /// Store immutable block IDs to storage, including the new LIB if needed.
+    /// If `prev_lib` is None, always includes the new LIB.
+    /// If `prev_lib` is Some, only includes new LIB if it changed.
+    async fn store_immutable_blocks_index(
+        pruned_blocks: &PrunedBlocks<HeaderId>,
+        prev_lib: Option<HeaderId>,
+        new_lib: HeaderId,
+        new_lib_slot: Slot,
+        storage_adapter: &StorageAdapter<Storage, Tx, RuntimeServiceId>,
+    ) -> Result<(), Error> {
+        let mut immutable_blocks = pruned_blocks.immutable_blocks().clone();
+        // The new LIB is also immutable and should be immediately queryable by slot.
+        // prune_immutable_blocks() only returns blocks older than the new LIB,
+        // so we explicitly add the new LIB here.
+        if prev_lib.is_none_or(|prev| prev != new_lib) {
+            immutable_blocks.insert(new_lib_slot, new_lib);
+        }
+        storage_adapter
+            .store_immutable_block_ids(immutable_blocks)
+            .await
+            .map_err(|e| Error::Storage(format!("Failed to store immutable block ids: {e}")))
     }
 
     /// Retrieves the blocks in the range from `from` to `to` from the storage.
@@ -1047,6 +1096,8 @@ where
             genesis_id,
             ledger_config,
             state,
+            self.state.lib_block_slot,
+            self.state.lib_block_length,
         );
 
         // We reapply blocks here instead of saving ledger states to correcly make use
@@ -1211,7 +1262,7 @@ where
                     height: tip.length(),
                 });
 
-                info!("Sending tip response: {response:?}");
+                debug!("Sending tip response: {response:?}");
                 if let Err(e) = reply_sender.send(response).await {
                     error!("Failed to send tip header: {e}");
                 }
@@ -1246,11 +1297,21 @@ where
         cryptarchia: Cryptarchia,
         storage_blocks_to_remove: &HashSet<HeaderId>,
         storage_adapter: &StorageAdapter<Storage, Tx, RuntimeServiceId>,
+        chain_online_notifier: &ChainOnlineNotifier,
     ) -> (Cryptarchia, HashSet<HeaderId>) {
         let (cryptarchia, pruned_blocks) = cryptarchia.online();
-        if let Err(e) = storage_adapter
-            .store_immutable_block_ids(pruned_blocks.immutable_blocks().clone())
-            .await
+        info!("Chain switched to Online mode");
+
+        chain_online_notifier.notify();
+
+        if let Err(e) = Self::store_immutable_blocks_index(
+            &pruned_blocks,
+            None,
+            cryptarchia.lib(),
+            cryptarchia.consensus.lib_branch().slot(),
+            storage_adapter,
+        )
+        .await
         {
             error!("Could not store immutable block IDs: {e}");
         }

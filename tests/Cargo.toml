@@ -16,44 +16,34 @@ workspace = true
 [dependencies]
 async-trait                      = "0.1"
 cucumber                         = { features = ["output-junit"], version = "=0.22.0" }
+derivative                       = "2.2.0"
 futures                          = { default-features = false, version = "0.3" }
 futures-util                     = { default-features = false, version = "0.3.31" }
 hex                              = { default-features = false, version = "0.4.3" }
-lb-api-service                   = { workspace = true }
-lb-blend-proofs                  = { workspace = true }
-lb-blend-service                 = { features = ["libp2p"], workspace = true }
 lb-chain-broadcast-service       = { workspace = true }
-lb-chain-network-service         = { workspace = true }
 lb-chain-service                 = { workspace = true }
 lb-common-http-client            = { workspace = true }
 lb-core                          = { workspace = true }
 lb-cryptarchia-engine            = { features = ["serde"], workspace = true }
-lb-cryptarchia-sync              = { workspace = true }
 lb-groth16                       = { workspace = true }
 lb-http-api-common               = { workspace = true }
 lb-key-management-system-service = { workspace = true }
 lb-libp2p                        = { workspace = true }
 lb-network-service               = { features = ["libp2p"], workspace = true }
 lb-node                          = { default-features = false, features = ["testing"], workspace = true }
-lb-pol                           = { features = ["high-active-slot-coefficient"], workspace = true }
-lb-sdp-service                   = { workspace = true }
-lb-time-service                  = { workspace = true }
-lb-tracing                       = { workspace = true }
-lb-tracing-service               = { workspace = true }
+lb-testing-framework             = { workspace = true }
 lb-tx-service                    = { features = ["libp2p", "mock"], workspace = true }
 lb-utils                         = { workspace = true }
-lb-wallet-service                = { workspace = true }
 num-bigint                       = { default-features = false, version = "0.4" }
 rand                             = { workspace = true }
 reqwest                          = { features = ["json"], workspace = true }
 serde_json                       = "1.0"
 serde_yaml                       = "0.9"
 serial_test                      = "3.1.1"
+strum                            = "0.27.2"
 tempfile                         = { workspace = true }
-testing-framework-core           = { git = "https://github.com/logos-blockchain/logos-blockchain-testing.git", rev = "e32c0366204e2904452b8b0d0fc9c32d194ac365" }
-testing-framework-runner-compose = { git = "https://github.com/logos-blockchain/logos-blockchain-testing.git", rev = "e32c0366204e2904452b8b0d0fc9c32d194ac365" }
-testing-framework-runner-local   = { git = "https://github.com/logos-blockchain/logos-blockchain-testing.git", rev = "e32c0366204e2904452b8b0d0fc9c32d194ac365" }
-testing-framework-workflows      = { git = "https://github.com/logos-blockchain/logos-blockchain-testing.git", rev = "e32c0366204e2904452b8b0d0fc9c32d194ac365" }
+testing-framework-core           = { workspace = true }
+testing-framework-runner-local   = { workspace = true }
 thiserror                        = { default-features = false, version = "2.0" }
 time                             = { default-features = false, version = "0.3" }
 tokio                            = "1"
@@ -64,6 +54,10 @@ tracing-subscriber               = { features = ["env-filter", "fmt"], version =
 cucumber             = []
 cucumber_stand_alone = []
 testing_framework    = []
+
+[[test]]
+name = "test_blend_local_setup"
+path = "src/tests/blend/local.rs"
 
 [[test]]
 name = "test_cryptarchia_happy_path"
@@ -96,6 +90,16 @@ path = "src/tests/mantle/sdp_ops.rs"
 [[test]]
 name              = "test_testing_framework_smoke_local"
 path              = "src/tests/testing_framework/smoke_local.rs"
+required-features = ["testing_framework"]
+
+[[test]]
+name              = "test_testing_framework_external_urls_inscription"
+path              = "src/tests/testing_framework/external_urls_inscription.rs"
+required-features = ["testing_framework"]
+
+[[test]]
+name              = "test_testing_framework_fork_detector"
+path              = "src/tests/testing_framework/fork_detector.rs"
 required-features = ["testing_framework"]
 
 [[test]]

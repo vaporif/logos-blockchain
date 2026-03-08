@@ -23,8 +23,8 @@ pub type InitializedLogosBlockchainNodeResult = PointerResult<LogosBlockchainNod
 /// - `config_path`: A pointer to a string representing the path to the
 ///   configuration file.
 /// - `deployment`: A pointer to a string representing either a well-known
-///   deployment name (e.g., "mainnet") or a path to a deployment YAML file. If
-///   null, defaults to "testnet".
+///   deployment name (e.g., "devnet") or a path to a deployment YAML file. If
+///   null, defaults to "devnet".
 ///
 /// # Returns
 ///
@@ -49,8 +49,8 @@ pub extern "C" fn start_lb_node(
 /// - `config_path`: A pointer to a string representing the path to the
 ///   configuration file.
 /// - `deployment`: A pointer to a string representing either a well-known
-///   deployment name (e.g., "mainnet") or a path to a deployment YAML file. If
-///   null, defaults to "testnet".
+///   deployment name (e.g., "devnet") or a path to a deployment YAML file. If
+///   null, defaults to "devnet".
 ///
 /// # Returns
 ///
@@ -67,7 +67,7 @@ fn initialize_lb_node(
 
     let rt = Runtime::new().unwrap();
     let app = run_node_from_config(run_config).map_err(|e| {
-        eprintln!("Could not initialize Overwatch: {e}");
+        log::error!("Could not initialize Overwatch: {e}");
         OperationStatus::InitializationError
     })?;
 
@@ -75,14 +75,14 @@ fn initialize_lb_node(
 
     rt.block_on(async {
         let services_to_start = get_services_to_start(&app).await.map_err(|e| {
-            eprintln!("Could not get services to start: {e}");
+            log::error!("Could not get services to start: {e}");
             OperationStatus::InitializationError
         })?;
         app_handle
             .start_service_sequence(services_to_start)
             .await
             .map_err(|e| {
-                eprintln!("Could not start services: {e}");
+                log::error!("Could not start services: {e}");
                 OperationStatus::InitializationError
             })?;
         Ok(())
@@ -95,12 +95,12 @@ fn get_user_config(config_path: *const c_char) -> Result<UserConfig, OperationSt
     let user_config_path = unsafe { std::ffi::CStr::from_ptr(config_path) }
         .to_str()
         .map_err(|e| {
-            eprintln!("Could not convert the config path to string: {e}");
+            log::error!("Could not convert the config path to string: {e}");
             OperationStatus::InitializationError
         })?;
     deserialize_config_at_path::<UserConfig>(user_config_path.as_ref(), OnUnknownKeys::Warn)
         .map_err(|e| {
-            eprintln!("Could not parse config file: {e}");
+            log::error!("Could not parse config file: {e}");
             OperationStatus::InitializationError
         })
 }
@@ -114,7 +114,7 @@ fn get_deployment_config(
         let deployment_str = unsafe { std::ffi::CStr::from_ptr(deployment_arg) }
             .to_str()
             .map_err(|e| {
-                eprintln!("Could not convert deployment to string: {e}");
+                log::error!("Could not convert deployment to string: {e}");
                 OperationStatus::InitializationError
             })?;
         deployment_str.parse::<WellKnownDeployment>().map_or_else(
@@ -128,7 +128,7 @@ fn get_deployment_config(
         DeploymentType::Custom(path) => {
             deserialize_config_at_path::<DeploymentSettings>(path.as_ref(), OnUnknownKeys::Warn)
                 .map_err(|e| {
-                    eprintln!("Could not parse deployment file: {e}");
+                    log::error!("Could not parse deployment file: {e}");
                     OperationStatus::InitializationError
                 })
         }
@@ -155,7 +155,7 @@ fn get_deployment_config(
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn stop_node(node: *mut LogosBlockchainNode) -> OperationStatus {
     if node.is_null() {
-        eprintln!("Attempted to stop a null node pointer. This is a bug. Aborting.");
+        log::error!("Attempted to stop a null node pointer. This is a bug. Aborting.");
         return OperationStatus::NullPointer;
     }
 

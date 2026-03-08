@@ -9,9 +9,9 @@ use axum::{
     routing::get,
 };
 use lb_api_service::Backend;
-use lb_http_api_common::{paths::MANTLE_SDP_DECLARATIONS, utils::create_rate_limit_layer};
+use lb_http_api_common::paths::MANTLE_SDP_DECLARATIONS;
 pub use lb_network_service::backends::libp2p::Libp2p as NetworkBackend;
-use overwatch::{DynError, overwatch::handle::OverwatchHandle, services::AsServiceId};
+use overwatch::{overwatch::handle::OverwatchHandle, services::AsServiceId};
 use tokio::net::TcpListener;
 use tower::limit::ConcurrencyLimitLayer;
 use tower_http::{
@@ -59,13 +59,6 @@ where
         Ok(Self { settings })
     }
 
-    async fn wait_until_ready(
-        &mut self,
-        _overwatch_handle: OverwatchHandle<RuntimeServiceId>,
-    ) -> Result<(), DynError> {
-        Ok(())
-    }
-
     async fn serve(self, handle: OverwatchHandle<RuntimeServiceId>) -> Result<(), Self::Error> {
         let mut builder = CorsLayer::new();
         if self.settings.cors_origins.is_empty() {
@@ -88,12 +81,14 @@ where
                 get(get_sdp_declarations::<RuntimeServiceId>),
             )
             .with_state(handle)
+            .layer(axum::extract::DefaultBodyLimit::max(
+                self.settings.max_body_size,
+            ))
             .layer(TimeoutLayer::new(self.settings.timeout))
             .layer(RequestBodyLimitLayer::new(self.settings.max_body_size))
             .layer(ConcurrencyLimitLayer::new(
                 self.settings.max_concurrent_requests,
             ))
-            .layer(create_rate_limit_layer(&self.settings))
             .layer(TraceLayer::new_for_http())
             .layer(
                 builder

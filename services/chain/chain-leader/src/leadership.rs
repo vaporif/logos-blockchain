@@ -1,4 +1,4 @@
-use std::fmt::Debug;
+use std::fmt::{Debug, Display};
 
 use lb_core::{
     mantle::{Utxo, ops::leader_claim::VoucherCm},
@@ -6,36 +6,39 @@ use lb_core::{
 };
 use lb_cryptarchia_engine::{Epoch, Slot};
 use lb_key_management_system_service::{
-    backend::preload::KeyId,
-    keys::{Ed25519Key, UnsecuredZkKey},
+    backend::preload::KeyId, keys::Ed25519Key,
+    operators::zk::leader::BuildPrivateInputsWithLeaderKey,
 };
 use lb_ledger::{EpochState, UtxoTree};
-use lb_wallet_service::UtxoWithKeyId;
+use lb_wallet_service::{UtxoWithKeyId, api::WalletApi};
+use overwatch::services::AsServiceId;
 use rand::rngs::OsRng;
-use tokio::sync::watch::Sender;
+use tokio::sync::{oneshot, watch::Sender};
 
 use crate::{WinningPolInfo, kms::KmsAdapter};
 
-#[expect(
-    clippy::cognitive_complexity,
-    reason = "TODO: Address this at some point"
-)]
 /// Claim leadership for the given slot if we win the lottery.
 ///
-/// Returns the private inputs and signing key needed for proof generation,
-/// or `None` if we didn't win.
-pub async fn claim_leadership<RuntimeServiceId>(
+/// Returns the private inputs, signing key, and voucher commitment needed
+/// for proof generation, or `None` if we didn't win.
+pub async fn claim_leadership<Wallet, RuntimeServiceId>(
     utxos: &[UtxoWithKeyId],
     latest_tree: &UtxoTree,
     epoch_state: &EpochState,
     slot: Slot,
-    winning_pol_info_notifier: &WinningPoLSlotNotifier<'_>,
+    winning_pol_info_notifier: &PotentialWinningPoLSlotNotifier<'_>,
+    wallet: &WalletApi<Wallet, RuntimeServiceId>,
     kms: &(impl KmsAdapter<RuntimeServiceId, KeyId = KeyId> + Sync),
-) -> Option<(LeaderPrivate, Ed25519Key)> {
+) -> Option<(LeaderPrivate, Ed25519Key, VoucherCm)>
+where
+    Wallet: lb_wallet_service::api::WalletServiceData,
+    RuntimeServiceId: Debug + Display + Sync + AsServiceId<Wallet>,
+{
     for UtxoWithKeyId { utxo, key_id } in utxos {
-        let secret_key = kms.get_leader_key(key_id.clone()).await;
         let public_inputs = public_inputs_for_slot(epoch_state, slot, latest_tree);
-        let winning = check_winning(utxo, &public_inputs, &secret_key);
+        let winning = kms
+            .check_winning_with_key(key_id.clone(), utxo, &public_inputs)
+            .await;
         if winning {
             tracing::debug!(
                 "leader for slot {:?}, {:?}/{:?}",
@@ -44,49 +47,61 @@ pub async fn claim_leadership<RuntimeServiceId>(
                 epoch_state.total_stake()
             );
 
-            let (private_inputs, leader_signing_key) =
-                match private_inputs_for_winning_utxo_and_slot(
+            let voucher_cm = match wallet.generate_new_voucher().await {
+                Ok(voucher_cm) => voucher_cm,
+                Err(e) => {
+                    tracing::error!("Failed to generate voucher: {e:?}");
+                    continue;
+                }
+            };
+
+            let private_inputs_result = kms
+                .build_private_inputs_for_winning_utxo_and_slot(
+                    key_id.clone(),
                     utxo,
-                    &secret_key,
                     epoch_state,
                     public_inputs,
                     latest_tree,
-                ) {
-                    Ok(result) => result,
-                    Err(e) => {
-                        tracing::error!(
-                            "Failed to build private inputs for winning utxo {:?} for {slot:?}: {e:?}",
-                            utxo.id(),
-                        );
-                        continue;
-                    }
-                };
+                )
+                .await;
+            let (private_inputs, leader_signing_key) = match private_inputs_result {
+                Ok(result) => result,
+                Err(e) => {
+                    tracing::error!(
+                        "Failed to build private inputs for winning utxo {:?} for {slot:?}: {e:?}",
+                        utxo.id(),
+                    );
+                    continue;
+                }
+            };
 
             winning_pol_info_notifier.notify_about_winning_slot(
                 private_inputs.clone(),
+                public_inputs,
                 epoch_state.epoch,
                 slot,
             );
 
-            return Some((private_inputs, leader_signing_key));
+            return Some((private_inputs, leader_signing_key, voucher_cm));
+        } else {
+            tracing::trace!(
+                "Not a leader for slot {:?}, {:?}/{:?}",
+                slot,
+                utxo.note.value,
+                epoch_state.total_stake()
+            );
         }
-        tracing::trace!(
-            "Not a leader for slot {:?}, {:?}/{:?}",
-            slot,
-            utxo.note.value,
-            epoch_state.total_stake()
-        );
     }
 
     None
 }
 
-pub async fn generate_leader_proof(private_inputs: LeaderPrivate) -> Option<Groth16LeaderProof> {
+pub async fn generate_leader_proof(
+    private_inputs: LeaderPrivate,
+    voucher_cm: VoucherCm,
+) -> Option<Groth16LeaderProof> {
     let res = tokio::task::spawn_blocking(move || {
-        Groth16LeaderProof::prove(
-            private_inputs,
-            VoucherCm::default(), // TODO: use actual voucher commitment
-        )
+        Groth16LeaderProof::prove(private_inputs, voucher_cm)
     })
     .await;
     match res {
@@ -102,40 +117,40 @@ pub async fn generate_leader_proof(private_inputs: LeaderPrivate) -> Option<Grot
     }
 }
 
-/// Check if the given note is owned by the leader and wins the lottery with
-/// the given public inputs.
-fn check_winning(utxo: &Utxo, public_inputs: &LeaderPublic, secret_key: &UnsecuredZkKey) -> bool {
-    utxo.note.pk == secret_key.to_public_key()
-        && public_inputs.check_winning(utxo.note.value, utxo.id().0, *secret_key.as_fr())
-}
-
-fn private_inputs_for_winning_utxo_and_slot(
+pub fn operator_for_private_inputs_arguments_for_winning_utxo_and_slot(
     utxo: &Utxo,
-    secret_key: &UnsecuredZkKey,
     epoch_state: &EpochState,
     public_inputs: LeaderPublic,
     latest_tree: &UtxoTree,
-) -> Result<(LeaderPrivate, Ed25519Key), PrivateInputsError> {
+) -> Result<
+    (
+        BuildPrivateInputsWithLeaderKey,
+        oneshot::Receiver<LeaderPrivate>,
+        Ed25519Key,
+    ),
+    PrivateInputsError,
+> {
+    let (sender, receiver) = oneshot::channel();
     let aged_path = epoch_state
         .utxo_merkle_path(utxo)
         .ok_or(PrivateInputsError::AgedNoteNotFound)?;
     let latest_path = latest_tree
         .path(&utxo.id())
         .ok_or(PrivateInputsError::LatestNoteNotFound)?;
-    let secret_key = *secret_key.as_fr();
     // Generate a random one-time Ed25519 key for P_LEAD (as per PoL spec)
     let leader_signing_key = Ed25519Key::generate(&mut OsRng);
     let leader_pk = leader_signing_key.public_key();
 
     Ok((
-        LeaderPrivate::new(
-            public_inputs,
+        BuildPrivateInputsWithLeaderKey::new(
+            sender,
             *utxo,
-            &aged_path,
-            &latest_path,
-            secret_key,
-            &leader_pk,
+            public_inputs,
+            aged_path,
+            latest_path,
+            leader_pk,
         ),
+        receiver,
         leader_signing_key,
     ))
 }
@@ -150,12 +165,13 @@ fn public_inputs_for_slot(
         latest_tree.root(),
         epoch_state.nonce,
         slot.into(),
-        epoch_state.total_stake(),
+        epoch_state.lottery_0,
+        epoch_state.lottery_1,
     )
 }
 
 #[derive(thiserror::Error, Debug)]
-enum PrivateInputsError {
+pub enum PrivateInputsError {
     #[error("Aged note not found from merkle tree")]
     AgedNoteNotFound,
     #[error("Latest note not found from merkle tree")]
@@ -165,17 +181,22 @@ enum PrivateInputsError {
 /// Process every tick and reacts to the very first one received and the first
 /// one of every new epoch.
 ///
-/// Reacting to a tick means pre-calculating the winning slots for the epoch and
-/// notifying all consumers via the provided sender channel.
-pub struct WinningPoLSlotNotifier<'service> {
+/// Reacting to a tick means pre-calculating the potential winning slots for the
+/// epoch and notifying all consumers via the provided sender channel.
+///
+/// The term *potential* means that winning slots are computed based on the
+/// notes available at tick-processing time. A note may later be spent before
+/// the slot is reached, in which case it will not actually win. This notifier
+/// does not account for such cases.
+pub struct PotentialWinningPoLSlotNotifier<'service> {
     ledger_config: &'service lb_ledger::Config,
     sender: &'service Sender<Option<WinningPolInfo>>,
     /// Keeps track of the last processed epoch, if any, and for it the first
-    /// winning slot that was pre-computed, if any.
+    /// potential winning slot that was pre-computed, if any.
     last_processed_epoch_and_found_first_winning_slot: Option<(Epoch, Option<Slot>)>,
 }
 
-impl<'service> WinningPoLSlotNotifier<'service> {
+impl<'service> PotentialWinningPoLSlotNotifier<'service> {
     pub(super) const fn new(
         ledger_config: &'service lb_ledger::Config,
         sender: &'service Sender<Option<WinningPolInfo>>,
@@ -192,6 +213,7 @@ impl<'service> WinningPoLSlotNotifier<'service> {
     pub(super) async fn process_epoch<RuntimeServiceId>(
         &mut self,
         utxos: &[UtxoWithKeyId],
+        latest_tree: &UtxoTree,
         epoch_state: &EpochState,
         kms: &(impl KmsAdapter<RuntimeServiceId, KeyId = KeyId> + Sync),
     ) {
@@ -210,14 +232,14 @@ impl<'service> WinningPoLSlotNotifier<'service> {
         }
         tracing::debug!("Processing new epoch: {:?}", epoch_state.epoch);
 
-        self.check_epoch_winning_utxos(utxos, epoch_state, kms)
+        self.check_epoch_winning_utxos(utxos, latest_tree, epoch_state, kms)
             .await;
     }
 
-    #[expect(clippy::cognitive_complexity, reason = "TODO: extract inner loop")]
     async fn check_epoch_winning_utxos<RuntimeServiceId>(
         &mut self,
         utxos: &[UtxoWithKeyId],
+        latest_tree: &UtxoTree,
         epoch_state: &EpochState,
         kms: &(impl KmsAdapter<RuntimeServiceId, KeyId = KeyId> + Sync),
     ) {
@@ -227,8 +249,6 @@ impl<'service> WinningPoLSlotNotifier<'service> {
             .epoch_config
             .starting_slot(&epoch_state.epoch, self.ledger_config.base_period_length())
             .into();
-        // Not used to check if a slot wins the lottery.
-        let latest_tree = UtxoTree::new();
 
         let mut first_winning_slot: Option<Slot> = None;
         for UtxoWithKeyId { utxo, key_id } in utxos {
@@ -236,11 +256,11 @@ impl<'service> WinningPoLSlotNotifier<'service> {
                 let slot = epoch_starting_slot
                     .checked_add(offset)
                     .expect("Slot calculation overflow.");
-
-                let secret_key = kms.get_leader_key(key_id.clone()).await;
-
-                let public_inputs = public_inputs_for_slot(epoch_state, slot.into(), &latest_tree);
-                if !check_winning(utxo, &public_inputs, &secret_key) {
+                let public_inputs = public_inputs_for_slot(epoch_state, slot.into(), latest_tree);
+                let winning = kms
+                    .check_winning_with_key(key_id.clone(), utxo, &public_inputs)
+                    .await;
+                if !winning {
                     continue;
                 }
                 tracing::debug!("Found winning utxo with ID {:?} for slot {slot}", utxo.id());
@@ -248,13 +268,16 @@ impl<'service> WinningPoLSlotNotifier<'service> {
                 // Note: We discard the signing key here since this is just for pre-computing
                 // winning slots. The actual signing key will be generated when building the
                 // proof.
-                let (leader_private, _signing_key) = match private_inputs_for_winning_utxo_and_slot(
-                    utxo,
-                    &secret_key,
-                    epoch_state,
-                    public_inputs,
-                    &latest_tree,
-                ) {
+                let private_inputs_result = kms
+                    .build_private_inputs_for_winning_utxo_and_slot(
+                        key_id.clone(),
+                        utxo,
+                        epoch_state,
+                        public_inputs,
+                        latest_tree,
+                    )
+                    .await;
+                let (leader_private, _signing_key) = match private_inputs_result {
                     Ok(result) => result,
                     Err(e) => {
                         tracing::error!(
@@ -265,9 +288,13 @@ impl<'service> WinningPoLSlotNotifier<'service> {
                     }
                 };
 
-                if let Err(err) = self.sender.send(Some((leader_private, epoch_state.epoch))) {
-                    tracing::error!(
-                        "Failed to send pre-calculated PoL winning slots to receivers. Error: {err:?}"
+                if self
+                    .sender
+                    .send(Some((leader_private, public_inputs, epoch_state.epoch)))
+                    .is_err()
+                {
+                    tracing::debug!(
+                        "No active listeners for pre-calculated PoL winning slots. Not broadcasting."
                     );
                 } else {
                     // We stop the iteration as soon as the first winning slot for this epoch is
@@ -287,6 +314,7 @@ impl<'service> WinningPoLSlotNotifier<'service> {
     pub(super) fn notify_about_winning_slot(
         &self,
         private_inputs: LeaderPrivate,
+        public_inputs: LeaderPublic,
         epoch: Epoch,
         slot: Slot,
     ) {
@@ -302,9 +330,13 @@ impl<'service> WinningPoLSlotNotifier<'service> {
             return;
         }
 
-        if let Err(err) = self.sender.send(Some((private_inputs, epoch))) {
-            tracing::error!(
-                "Failed to send pre-calculated PoL winning slots to receivers. Error: {err:?}"
+        if self
+            .sender
+            .send(Some((private_inputs, public_inputs, epoch)))
+            .is_err()
+        {
+            tracing::debug!(
+                "No active listeners for pre-calculated PoL winning slots. Not broadcasting."
             );
         }
     }
@@ -312,20 +344,31 @@ impl<'service> WinningPoLSlotNotifier<'service> {
 
 #[cfg(test)]
 mod pol_tests {
-    use std::{num::NonZero, slice, sync::Arc};
+    use core::fmt;
+    use std::{fmt::Formatter, num::NonZero, slice, sync::Arc};
 
     use lb_core::{
-        mantle::ledger::{Note, Tx},
-        proofs::leader_proof::LeaderProof as _,
+        mantle::{
+            ledger::{Note, Tx},
+            ops::leader_claim::VoucherCm,
+        },
+        proofs::leader_proof::{LeaderProof as _, check_winning},
         sdp::{MinStake, ServiceParameters, ServiceType},
     };
     use lb_cryptarchia_engine::EpochConfig;
-    use lb_groth16::Fr;
+    use lb_groth16::{Fr, fr_from_bytes_unchecked};
+    use lb_key_management_system_service::keys::{UnsecuredZkKey, ZkKey};
     use lb_ledger::mantle::sdp::{
         Config as SdpConfig, ServiceRewardsParameters, rewards::blend::RewardsParameters,
     };
-    use lb_utils::math::NonNegativeF64;
-    use tokio::sync::watch;
+    use lb_utils::math::{NonNegativeF64, NonNegativeRatio};
+    use lb_wallet_service::{WalletMsg, WalletServiceSettings, api::WalletServiceData};
+    use overwatch::services::{
+        ServiceData,
+        relay::OutboundRelay,
+        state::{NoOperator, NoState},
+    };
+    use tokio::sync::{mpsc, watch};
 
     use super::*;
 
@@ -333,12 +376,13 @@ mod pol_tests {
     /// verified successfully.
     #[tokio::test]
     async fn test_build_proof_for() {
+        let config = test_config();
+
         // Create secret key and leader
         let kms = DummyKms;
         let key_id = KeyId::from("0");
-        let sk = kms.get_leader_key(key_id.clone()).await;
+        let sk = UnsecuredZkKey::new(Fr::from(0u64));
         let pk = sk.to_public_key();
-        let config = test_config();
 
         // Create a UTXO
         let utxo = Tx::new(vec![], vec![Note::new(1000u64, pk)])
@@ -350,28 +394,39 @@ mod pol_tests {
         let latest_tree = UtxoTree::new().insert(utxo.id(), utxo).0;
 
         // Create EpochState
+        let total_stake = utxo.note.value;
+        let (lottery_0, lottery_1) = config
+            .lottery_constants()
+            .compute_lottery_values(total_stake);
         let epoch_state = EpochState {
             epoch: 1.into(),
             nonce: Fr::from(999u64),
             utxos: aged_tree.clone(),
-            total_stake: utxo.note.value,
+            total_stake,
+            lottery_0,
+            lottery_1,
         };
 
         // Create notifier channel (not used in this test)
         let (sender, _receiver) = watch::channel(None);
-        let notifier = WinningPoLSlotNotifier::new(&config, &sender);
+        let notifier = PotentialWinningPoLSlotNotifier::new(&config, &sender);
 
-        // Find a winning slot by calling `build_proof_for` until it succeeds
+        // Create dummy wallet service
+        let wallet = DummyWallet::spawn();
+
+        // Find a winning slot by calling `claim_leadership` + `generate_leader_proof`
         let (proof, winning_slot) = find_winning_slot_and_generate_proof(
             (0..1000).map(Slot::from),
             UtxoWithKeyId { utxo, key_id },
             &epoch_state,
             &latest_tree,
             &notifier,
+            &wallet,
             &kms,
         )
         .await
         .expect("should find a winning slot and build a proof");
+        assert_eq!(proof.voucher_cm(), &dummy_voucher_cm());
 
         // Verify proof
         let public_inputs = LeaderPublic::new(
@@ -379,7 +434,8 @@ mod pol_tests {
             latest_tree.root(),
             epoch_state.nonce,
             winning_slot.into(),
-            utxo.note.value,
+            epoch_state.lottery_0,
+            epoch_state.lottery_1,
         );
         assert!(
             proof.verify(&public_inputs),
@@ -393,21 +449,23 @@ mod pol_tests {
         utxo: UtxoWithKeyId,
         epoch_state: &EpochState,
         latest_tree: &UtxoTree,
-        notifier: &WinningPoLSlotNotifier<'_>,
-        kms: &(impl KmsAdapter<(), KeyId = KeyId> + Sync),
+        notifier: &PotentialWinningPoLSlotNotifier<'_>,
+        wallet: &WalletApi<DummyWallet, TestRuntimeServiceId>,
+        kms: &(impl KmsAdapter<TestRuntimeServiceId, KeyId = KeyId> + Sync),
     ) -> Option<(Groth16LeaderProof, Slot)> {
         for slot in slots {
-            if let Some((private_inputs, _signing_key)) = claim_leadership(
+            if let Some((private_inputs, _signing_key, voucher_cm)) = claim_leadership(
                 slice::from_ref(&utxo),
                 latest_tree,
                 epoch_state,
                 slot,
                 notifier,
+                wallet,
                 kms,
             )
             .await
             {
-                if let Some(proof) = generate_leader_proof(private_inputs).await {
+                if let Some(proof) = generate_leader_proof(private_inputs, voucher_cm).await {
                     return Some((proof, slot));
                 }
             }
@@ -422,7 +480,11 @@ mod pol_tests {
                 epoch_period_nonce_buffer: NonZero::new(3).unwrap(),
                 epoch_period_nonce_stabilization: NonZero::new(4).unwrap(),
             },
-            consensus_config: lb_cryptarchia_engine::Config::new(NonZero::new(5).unwrap(), 0.05),
+            consensus_config: lb_cryptarchia_engine::Config::new(
+                NonZero::new(5).unwrap(),
+                NonNegativeRatio::new(1, 10.try_into().unwrap()),
+                1f64.try_into().expect("1 > 0"),
+            ),
             sdp_config: SdpConfig {
                 service_params: Arc::new(
                     [(
@@ -444,6 +506,7 @@ mod pol_tests {
                         num_blend_layers: NonZero::new(3u64).unwrap(),
                         minimum_network_size: NonZero::new(1u64).unwrap(),
                         data_replication_factor: 0,
+                        activity_threshold_sensitivity: 1,
                     },
                 },
                 min_stake: MinStake {
@@ -451,17 +514,103 @@ mod pol_tests {
                     timestamp: 0,
                 },
             },
+            faucet_pk: None,
         }
     }
 
     struct DummyKms;
 
     #[async_trait::async_trait]
-    impl KmsAdapter<()> for DummyKms {
+    impl KmsAdapter<TestRuntimeServiceId> for DummyKms {
         type KeyId = KeyId;
 
-        async fn get_leader_key(&self, _: Self::KeyId) -> UnsecuredZkKey {
-            UnsecuredZkKey::new(Fr::from(0u64))
+        async fn check_winning_with_key(
+            &self,
+            _: Self::KeyId,
+            utxo: &Utxo,
+            leader_public: &LeaderPublic,
+        ) -> bool {
+            let sk = ZkKey::new(Fr::from(0u64));
+            check_winning(*utxo, *leader_public, &sk.to_public_key(), Fr::from(0u64))
+        }
+
+        async fn build_private_inputs_for_winning_utxo_and_slot(
+            &self,
+            _: Self::KeyId,
+            utxo: &Utxo,
+            epoch_state: &EpochState,
+            public_inputs: LeaderPublic,
+            latest_tree: &UtxoTree,
+        ) -> Result<(LeaderPrivate, Ed25519Key), PrivateInputsError> {
+            let aged_path = epoch_state
+                .utxo_merkle_path(utxo)
+                .ok_or(PrivateInputsError::AgedNoteNotFound)?;
+            let latest_path = latest_tree
+                .path(&utxo.id())
+                .ok_or(PrivateInputsError::LatestNoteNotFound)?;
+            // Generate a random one-time Ed25519 key for P_LEAD (as per PoL spec)
+            let leader_signing_key = Ed25519Key::generate(&mut OsRng);
+            let leader_pk = leader_signing_key.public_key();
+            let leader_private = LeaderPrivate::new(
+                public_inputs,
+                *utxo,
+                &aged_path,
+                &latest_path,
+                Fr::from(0u64),
+                &leader_pk,
+            );
+            Ok((leader_private, leader_signing_key))
+        }
+    }
+
+    struct DummyWallet;
+
+    impl ServiceData for DummyWallet {
+        type Settings = WalletServiceSettings;
+        type State = NoState<Self::Settings>;
+        type StateOperator = NoOperator<Self::State>;
+        type Message = WalletMsg;
+    }
+
+    impl WalletServiceData for DummyWallet {
+        type Kms = ();
+        type Cryptarchia = ();
+        type Tx = ();
+        type Storage = ();
+    }
+
+    impl DummyWallet {
+        fn spawn() -> WalletApi<Self, TestRuntimeServiceId> {
+            let (msg_sender, mut msg_receiver) = mpsc::channel(10);
+
+            tokio::spawn(async move {
+                while let Some(msg) = msg_receiver.recv().await {
+                    if let WalletMsg::GenerateNewVoucherSecret { resp_tx } = msg {
+                        let _ = resp_tx.send(dummy_voucher_cm());
+                    }
+                }
+            });
+
+            WalletApi::<Self, TestRuntimeServiceId>::new(OutboundRelay::new(msg_sender))
+        }
+    }
+
+    const DUMMY_VOUCHER_CM_BYTES: [u8; 32] = [99u8; 32];
+
+    fn dummy_voucher_cm() -> VoucherCm {
+        fr_from_bytes_unchecked(&DUMMY_VOUCHER_CM_BYTES).into()
+    }
+
+    #[derive(Debug)]
+    struct TestRuntimeServiceId;
+
+    impl AsServiceId<DummyWallet> for TestRuntimeServiceId {
+        const SERVICE_ID: Self = Self;
+    }
+
+    impl Display for TestRuntimeServiceId {
+        fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+            write!(f, "TestRuntimeServiceId")
         }
     }
 }

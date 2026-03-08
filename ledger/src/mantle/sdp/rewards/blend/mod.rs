@@ -237,6 +237,7 @@ pub struct RewardsParameters {
     pub num_blend_layers: NonZeroU64,
     pub data_replication_factor: u64,
     pub minimum_network_size: NonZeroU64,
+    pub activity_threshold_sensitivity: u64,
 }
 
 impl RewardsParameters {
@@ -252,7 +253,11 @@ impl RewardsParameters {
         );
         Ok((
             core_quota,
-            BlendingTokenEvaluation::new(core_quota, num_core_nodes)?,
+            BlendingTokenEvaluation::new(
+                core_quota,
+                num_core_nodes,
+                self.activity_threshold_sensitivity,
+            )?,
         ))
     }
 
@@ -263,7 +268,8 @@ impl RewardsParameters {
             pol_ledger_aged: epoch_state.utxos.root(),
             pol_epoch_nonce: epoch_state.nonce,
             message_quota,
-            total_stake: epoch_state.total_stake,
+            lottery_0: epoch_state.lottery_0,
+            lottery_1: epoch_state.lottery_1,
         }
     }
 }
@@ -303,6 +309,7 @@ mod tests {
             num_blend_layers: NonZeroU64::new(3).unwrap(),
             minimum_network_size: minimum_network_size.try_into().unwrap(),
             data_replication_factor: 0,
+            activity_threshold_sensitivity: 1,
         }
     }
 

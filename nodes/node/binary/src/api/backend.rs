@@ -2,7 +2,7 @@
 
 use std::{
     fmt::{Debug, Display},
-    time::Duration,
+    marker::PhantomData,
 };
 
 use axum::{
@@ -15,20 +15,18 @@ use axum::{
 };
 use lb_api_service::{Backend, http::consensus::Cryptarchia};
 use lb_chain_broadcast_service::BlockBroadcastService;
+use lb_chain_leader_service::api::ChainLeaderServiceData;
 use lb_chain_service::CryptarchiaConsensus;
 use lb_core::{
     header::HeaderId,
     mantle::{SignedMantleTx, Transaction},
 };
+use lb_http_api_common::paths;
 pub use lb_http_api_common::settings::AxumBackendSettings;
-use lb_http_api_common::{paths, utils::create_rate_limit_layer};
 use lb_sdp_service::{mempool::SdpMempoolAdapter, wallet::SdpWalletAdapter};
-use lb_services_utils::wait_until_services_are_ready;
 use lb_storage_service::{StorageService, backends::rocksdb::RocksBackend};
-use lb_tx_service::{
-    MempoolMetrics, TxMempoolService, backend::Mempool, tx::service::openapi::Status,
-};
-use overwatch::{DynError, overwatch::handle::OverwatchHandle, services::AsServiceId};
+use lb_tx_service::{TxMempoolService, backend::Mempool};
+use overwatch::{overwatch::handle::OverwatchHandle, services::AsServiceId};
 use tokio::net::TcpListener;
 use tower::limit::ConcurrencyLimitLayer;
 use tower_http::{
@@ -37,7 +35,7 @@ use tower_http::{
     timeout::TimeoutLayer,
     trace::TraceLayer,
 };
-use utoipa::OpenApi;
+use utoipa::OpenApi as _;
 use utoipa_swagger_ui::SwaggerUi;
 
 use super::handlers::{
@@ -46,7 +44,10 @@ use super::handlers::{
 };
 use crate::{
     WalletService,
-    api::handlers::{post_activity, post_declaration, post_withdrawal},
+    api::{
+        handlers::{leader_claim, post_activity, post_declaration, post_withdrawal},
+        openapi::ApiDoc,
+    },
 };
 
 pub(crate) type BlockStorageBackend = RocksBackend;
@@ -58,23 +59,37 @@ pub struct AxumBackend<
     MempoolStorageAdapter,
     SdpMempool,
     SdpWallet,
+    ChainLeader,
 > {
     settings: AxumBackendSettings,
-    _time_backend: core::marker::PhantomData<TimeBackend>,
-    _storage_adapter: core::marker::PhantomData<HttpStorageAdapter>,
-    _mempool_storage_adapter: core::marker::PhantomData<MempoolStorageAdapter>,
-    _sdp_mempool_adapter: core::marker::PhantomData<SdpMempool>,
-    _sdp_wallet_adapter: core::marker::PhantomData<SdpWallet>,
+    _phantom: PhantomData<(
+        TimeBackend,
+        HttpStorageAdapter,
+        MempoolStorageAdapter,
+        SdpMempool,
+        SdpWallet,
+        ChainLeader,
+    )>,
 }
 
-#[derive(OpenApi)]
-#[openapi(paths(), components(schemas(Status, MempoolMetrics)), tags())]
-struct ApiDoc;
-
 #[async_trait::async_trait]
-impl<TimeBackend, StorageAdapter, MempoolStorageAdapter, SdpMempool, SdpWallet, RuntimeServiceId>
-    Backend<RuntimeServiceId>
-    for AxumBackend<TimeBackend, StorageAdapter, MempoolStorageAdapter, SdpMempool, SdpWallet>
+impl<
+    TimeBackend,
+    StorageAdapter,
+    MempoolStorageAdapter,
+    SdpMempool,
+    SdpWallet,
+    ChainLeader,
+    RuntimeServiceId,
+> Backend<RuntimeServiceId>
+    for AxumBackend<
+        TimeBackend,
+        StorageAdapter,
+        MempoolStorageAdapter,
+        SdpMempool,
+        SdpWallet,
+        ChainLeader,
+    >
 where
     TimeBackend: lb_time_service::backends::TimeBackend + Send + 'static,
     TimeBackend::Settings: Clone + Send + Sync,
@@ -91,6 +106,7 @@ where
     MempoolStorageAdapter::Error: Debug,
     SdpMempool: SdpMempoolAdapter + Send + Sync + 'static,
     SdpWallet: SdpWalletAdapter + Send + Sync + 'static,
+    ChainLeader: ChainLeaderServiceData,
     RuntimeServiceId: Debug
         + Sync
         + Send
@@ -124,8 +140,16 @@ where
                 RuntimeServiceId,
             >,
         >
-        + AsServiceId<lb_sdp_service::SdpService<SdpMempool, SdpWallet, RuntimeServiceId>>
-        + AsServiceId<WalletService>,
+        + AsServiceId<
+            lb_sdp_service::SdpService<
+                SdpMempool,
+                SdpWallet,
+                Cryptarchia<RuntimeServiceId>,
+                RuntimeServiceId,
+            >,
+        >
+        + AsServiceId<WalletService>
+        + AsServiceId<ChainLeader>,
 {
     type Error = std::io::Error;
     type Settings = AxumBackendSettings;
@@ -136,28 +160,8 @@ where
     {
         Ok(Self {
             settings,
-            _time_backend: core::marker::PhantomData,
-            _storage_adapter: core::marker::PhantomData,
-            _mempool_storage_adapter: core::marker::PhantomData,
-            _sdp_mempool_adapter: core::marker::PhantomData,
-            _sdp_wallet_adapter: core::marker::PhantomData,
+            _phantom: PhantomData,
         })
-    }
-
-    async fn wait_until_ready(
-        &mut self,
-        overwatch_handle: OverwatchHandle<RuntimeServiceId>,
-    ) -> Result<(), DynError> {
-        wait_until_services_are_ready!(
-            &overwatch_handle,
-            Some(Duration::from_secs(60)),
-            Cryptarchia<_>,
-            lb_network_service::NetworkService<_, _>,
-            BlockStorageService<_>,
-            TxMempoolService<_, _, _,  _>
-        )
-        .await?;
-        Ok(())
     }
 
     #[expect(clippy::too_many_lines, reason = "TODO: Address this at some point.")]
@@ -212,15 +216,40 @@ where
             )
             .route(
                 paths::SDP_POST_DECLARATION,
-                routing::post(post_declaration::<SdpMempool, SdpWallet, RuntimeServiceId>),
+                routing::post(
+                    post_declaration::<
+                        SdpMempool,
+                        SdpWallet,
+                        Cryptarchia<RuntimeServiceId>,
+                        RuntimeServiceId,
+                    >,
+                ),
             )
             .route(
                 paths::SDP_POST_ACTIVITY,
-                routing::post(post_activity::<SdpMempool, SdpWallet, RuntimeServiceId>),
+                routing::post(
+                    post_activity::<
+                        SdpMempool,
+                        SdpWallet,
+                        Cryptarchia<RuntimeServiceId>,
+                        RuntimeServiceId,
+                    >,
+                ),
             )
             .route(
                 paths::SDP_POST_WITHDRAWAL,
-                routing::post(post_withdrawal::<SdpMempool, SdpWallet, RuntimeServiceId>),
+                routing::post(
+                    post_withdrawal::<
+                        SdpMempool,
+                        SdpWallet,
+                        Cryptarchia<RuntimeServiceId>,
+                        RuntimeServiceId,
+                    >,
+                ),
+            )
+            .route(
+                paths::LEADER_CLAIM,
+                routing::post(leader_claim::<ChainLeader, RuntimeServiceId>),
             )
             .route(
                 paths::wallet::BALANCE,
@@ -228,7 +257,13 @@ where
             )
             .route(
                 paths::wallet::TRANSACTIONS_TRANSFER_FUNDS,
-                routing::post(wallet::post_transactions_transfer_funds::<WalletService, _>),
+                routing::post(
+                    wallet::post_transactions_transfer_funds::<
+                        WalletService,
+                        MempoolStorageAdapter,
+                        _,
+                    >,
+                ),
             );
 
         let app = app.route(
@@ -249,12 +284,14 @@ where
 
         let app = app
             .with_state(handle.clone())
+            .layer(axum::extract::DefaultBodyLimit::max(
+                self.settings.max_body_size,
+            ))
             .layer(TimeoutLayer::new(self.settings.timeout))
             .layer(RequestBodyLimitLayer::new(self.settings.max_body_size))
             .layer(ConcurrencyLimitLayer::new(
                 self.settings.max_concurrent_requests,
             ))
-            .layer(create_rate_limit_layer(&self.settings))
             .layer(TraceLayer::new_for_http());
 
         let cors_layer = builder
