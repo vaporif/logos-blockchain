@@ -1,4 +1,4 @@
-use lb_groth16::{Fr, serde::serde_fr};
+use lb_groth16::{serde::serde_fr, Fr};
 use lb_utxotree::MerklePath;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -42,6 +42,11 @@ impl Groth16LeaderClaimProof {
     #[must_use]
     pub const fn proof(&self) -> &lb_poc::PoCProof {
         &self.proof
+    }
+
+    #[must_use]
+    pub const fn new(proof: lb_poc::PoCProof, voucher_nf: VoucherNullifier) -> Self {
+        Self { proof, voucher_nf }
     }
 }
 
