@@ -350,8 +350,11 @@ where
                     tracing::debug!("Failed to send transactions reply");
                 }
             }
-            MempoolMsg::Remove { ids } => {
-                pool.remove(&ids).await;
+            MempoolMsg::Remove { ids, reply_channel } => {
+                let result = pool.remove(&ids).await;
+                if let Err(e) = reply_channel.send(result) {
+                    tracing::debug!("Failed to send remove reply: {e:?}");
+                }
             }
             MempoolMsg::Metrics { reply_channel } => {
                 Self::handle_metrics_message(pool, reply_channel);

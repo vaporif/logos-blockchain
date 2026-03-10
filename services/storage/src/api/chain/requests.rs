@@ -44,6 +44,7 @@ pub enum ChainApiRequest<Backend: StorageBackend> {
     },
     StoreTransactions {
         transactions: HashMap<TxHash, <Backend as StorageChainApi>::Tx>,
+        response_tx: Sender<()>,
     },
     GetTransactions {
         tx_hashes: BTreeSet<TxHash>,
@@ -51,6 +52,7 @@ pub enum ChainApiRequest<Backend: StorageBackend> {
     },
     RemoveTransactions {
         tx_hashes: Vec<TxHash>,
+        response_tx: Sender<()>,
     },
 }
 
@@ -82,16 +84,18 @@ where
                 limit,
                 response_tx,
             } => handle_scan_immutable_block_ids(backend, slot_range, limit, response_tx).await,
-            Self::StoreTransactions { transactions } => {
-                handle_store_transactions(backend, transactions).await
-            }
+            Self::StoreTransactions {
+                transactions,
+                response_tx,
+            } => handle_store_transactions(backend, transactions, response_tx).await,
             Self::GetTransactions {
                 tx_hashes,
                 response_tx,
             } => handle_get_transactions(backend, tx_hashes, response_tx).await,
-            Self::RemoveTransactions { tx_hashes } => {
-                handle_remove_transactions(backend, tx_hashes).await
-            }
+            Self::RemoveTransactions {
+                tx_hashes,
+                response_tx,
+            } => handle_remove_transactions(backend, tx_hashes, response_tx).await,
         }
     }
 }
@@ -272,11 +276,15 @@ impl<Api: StorageBackend> StorageMsg<Api> {
     }
 
     #[must_use]
-    pub const fn store_transactions_request(
+    pub fn store_transactions_request(
         transactions: HashMap<TxHash, <Api as StorageChainApi>::Tx>,
+        response_tx: Sender<()>,
     ) -> Self {
         Self::Api {
-            request: StorageApiRequest::Chain(ChainApiRequest::StoreTransactions { transactions }),
+            request: StorageApiRequest::Chain(ChainApiRequest::StoreTransactions {
+                transactions,
+                response_tx,
+            }),
         }
     }
 
@@ -294,9 +302,12 @@ impl<Api: StorageBackend> StorageMsg<Api> {
     }
 
     #[must_use]
-    pub const fn remove_transactions_request(tx_hashes: Vec<TxHash>) -> Self {
+    pub fn remove_transactions_request(tx_hashes: Vec<TxHash>, response_tx: Sender<()>) -> Self {
         Self::Api {
-            request: StorageApiRequest::Chain(ChainApiRequest::RemoveTransactions { tx_hashes }),
+            request: StorageApiRequest::Chain(ChainApiRequest::RemoveTransactions {
+                tx_hashes,
+                response_tx,
+            }),
         }
     }
 }
@@ -304,12 +315,17 @@ impl<Api: StorageBackend> StorageMsg<Api> {
 async fn handle_store_transactions<Backend: StorageBackend>(
     backend: &mut Backend,
     transactions: HashMap<TxHash, <Backend as StorageChainApi>::Tx>,
+    response_tx: Sender<()>,
 ) -> Result<(), StorageServiceError> {
     backend
         .store_transactions(transactions)
         .await
         .map_err(|e| StorageServiceError::BackendError(e.into()))?;
-    Ok(())
+    response_tx
+        .send(())
+        .map_err(|_| StorageServiceError::ReplyError {
+            message: "Failed to send reply for store transactions request".to_owned(),
+        })
 }
 
 async fn handle_get_transactions<Backend: StorageBackend>(
@@ -334,10 +350,15 @@ async fn handle_get_transactions<Backend: StorageBackend>(
 async fn handle_remove_transactions<Backend: StorageBackend>(
     backend: &mut Backend,
     tx_hashes: Vec<TxHash>,
+    response_tx: Sender<()>,
 ) -> Result<(), StorageServiceError> {
     backend
         .remove_transactions(&tx_hashes)
         .await
         .map_err(|e| StorageServiceError::BackendError(e.into()))?;
-    Ok(())
+    response_tx
+        .send(())
+        .map_err(|_| StorageServiceError::ReplyError {
+            message: "Failed to send reply for remove transactions request".to_owned(),
+        })
 }

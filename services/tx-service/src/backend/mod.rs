@@ -55,7 +55,7 @@ pub trait MemPool {
         I: IntoIterator<Item = Self::Key> + Send;
 
     /// Remove items from the mempool..
-    async fn remove(&mut self, items: &[Self::Key]);
+    async fn remove(&mut self, items: &[Self::Key]) -> Result<(), MempoolError>;
 
     fn pending_item_count(&self) -> usize;
     fn last_item_timestamp(&self) -> u64;

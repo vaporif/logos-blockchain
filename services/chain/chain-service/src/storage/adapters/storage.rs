@@ -158,10 +158,18 @@ where
             })
             .collect::<Result<HashMap<_, _>, overwatch::DynError>>()?;
 
+        let (reply_tx, reply_rx) = oneshot::channel();
         self.storage_relay
-            .send(StorageMsg::store_transactions_request(storage_transactions))
+            .send(StorageMsg::store_transactions_request(
+                storage_transactions,
+                reply_tx,
+            ))
             .await
             .map_err(|_| "Failed to send store transactions batch request")?;
+
+        reply_rx
+            .await
+            .map_err(|_| "Failed to receive store transactions response")?;
 
         Ok(())
     }
@@ -188,10 +196,18 @@ where
     }
 
     async fn remove_transactions(&self, tx_hashes: &[TxHash]) -> Result<(), overwatch::DynError> {
+        let (reply_tx, reply_rx) = oneshot::channel();
         self.storage_relay
-            .send(StorageMsg::remove_transactions_request(tx_hashes.to_vec()))
+            .send(StorageMsg::remove_transactions_request(
+                tx_hashes.to_vec(),
+                reply_tx,
+            ))
             .await
             .map_err(|_| "Failed to send remove transactions batch request")?;
+
+        reply_rx
+            .await
+            .map_err(|_| "Failed to receive remove transactions response")?;
 
         Ok(())
     }

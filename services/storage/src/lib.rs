@@ -312,7 +312,6 @@ where
     ) -> Result<(), StorageServiceError> {
         <StorageApiRequest<Backend> as StorageOperation<Backend>>::execute(api_call, api_backend)
             .await
-            .map_err(|e| StorageServiceError::BackendError(e.into()))
     }
 }
 

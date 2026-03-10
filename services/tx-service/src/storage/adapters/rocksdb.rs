@@ -59,12 +59,22 @@ where
         let mut transactions = HashMap::new();
         transactions.insert(tx_hash, item_bytes);
 
+        let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
         self.storage_relay
-            .send(StorageMsg::store_transactions_request(transactions))
+            .send(StorageMsg::store_transactions_request(
+                transactions,
+                reply_tx,
+            ))
             .await
             .map_err(|_| {
                 MempoolError::DynamicPoolError("Failed to send store transactions request".into())
-            })
+            })?;
+
+        reply_rx.await.map_err(|_| {
+            MempoolError::DynamicPoolError(
+                "Failed to receive store transactions response".into(),
+            )
+        })
     }
 
     async fn get_items(
@@ -100,11 +110,18 @@ where
     async fn remove_items(&mut self, keys: &[Self::Key]) -> Result<(), Self::Error> {
         let tx_hashes: Vec<TxHash> = keys.iter().cloned().map(Into::into).collect();
 
+        let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
         self.storage_relay
-            .send(StorageMsg::remove_transactions_request(tx_hashes))
+            .send(StorageMsg::remove_transactions_request(tx_hashes, reply_tx))
             .await
             .map_err(|_| {
                 MempoolError::DynamicPoolError("Failed to send remove transactions request".into())
-            })
+            })?;
+
+        reply_rx.await.map_err(|_| {
+            MempoolError::DynamicPoolError(
+                "Failed to receive remove transactions response".into(),
+            )
+        })
     }
 }

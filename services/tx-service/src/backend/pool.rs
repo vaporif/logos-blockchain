@@ -89,13 +89,10 @@ where
             .unwrap()
             .as_millis() as u64;
 
-        if let Err(e) = self
-            .storage_adapter
+        self.storage_adapter
             .store_item(key.clone(), item.into())
             .await
-        {
-            tracing::warn!("Failed to store item in storage: {:?}", e);
-        }
+            .map_err(|e| MempoolError::StorageError(format!("{e:?}")))?;
 
         self.pending_items.insert(key);
         self.last_item_timestamp = timestamp;
@@ -125,14 +122,17 @@ where
             .map_err(|e| MempoolError::StorageError(format!("{e:?}")))
     }
 
-    async fn remove(&mut self, keys: &[Self::Key]) {
+    async fn remove(&mut self, keys: &[Self::Key]) -> Result<(), MempoolError> {
+        self.storage_adapter
+            .remove_items(keys)
+            .await
+            .map_err(|e| MempoolError::StorageError(format!("{e:?}")))?;
+
         for key in keys {
             self.pending_items.remove(key);
         }
 
-        if let Err(e) = self.storage_adapter.remove_items(keys).await {
-            tracing::warn!("Failed to remove items from storage: {e:?}");
-        }
+        Ok(())
     }
 
     fn pending_item_count(&self) -> usize {

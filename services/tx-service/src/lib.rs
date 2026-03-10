@@ -68,6 +68,7 @@ pub enum MempoolMsg<BlockId, Payload, Item, Key> {
     },
     Remove {
         ids: Vec<Key>,
+        reply_channel: Sender<Result<(), MempoolError>>,
     },
     Metrics {
         reply_channel: Sender<MempoolMetrics>,
@@ -100,7 +101,7 @@ where
                 )
             }
             Self::Add { payload, .. } => write!(f, "MempoolMsg::Add{{payload: {payload:?}}}"),
-            Self::Remove { ids } => write!(f, "MempoolMsg::Prune{{ids: {ids:?}}}"),
+            Self::Remove { ids, .. } => write!(f, "MempoolMsg::Prune{{ids: {ids:?}}}"),
             Self::Metrics { .. } => write!(f, "MempoolMsg::Metrics"),
             Self::Status { items, .. } => write!(f, "MempoolMsg::Status{{items: {items:?}}}"),
             Self::Subscribe { .. } => write!(f, "MempoolMsg::Subscribe"),
