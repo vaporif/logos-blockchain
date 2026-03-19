@@ -53,10 +53,10 @@ Circuits are installed to `~/.logos-blockchain-circuits/` by default.
 
 ```bash
 # Specific version
-./scripts/setup-logos-blockchain-circuits.sh v0.4.1
+./scripts/setup-logos-blockchain-circuits.sh v0.4.2
 
 # Custom directory
-./scripts/setup-logos-blockchain-circuits.sh v0.4.1 /opt/circuits
+./scripts/setup-logos-blockchain-circuits.sh v0.4.2 /opt/circuits
 export LOGOS_BLOCKCHAIN_CIRCUITS=/opt/circuits
 ```
 
@@ -206,6 +206,19 @@ dot -Tsvg deps.dot -o deps.svg
 ```
 
 Or paste the `.dot` file into [Graphviz Online][graphviz-online].
+
+### Heap profiling
+
+To enable debug symbols with dhat profiling in release mode, enable the 'dhat-heap' feature and use
+CARGO_PROFILE_* Environment Variables:
+```bash
+   CARGO_PROFILE_RELEASE_DEBUG=true cargo build --release --features=dhat-heap               ...(Linux)
+```
+```pwsh
+   $env:CARGO_PROFILE_RELEASE_DEBUG = "true"; cargo build --release --features=dhat-heap     ...(PowerShell)
+```
+Run, then stop the node normally to capture the output, then read the generated 'dhat-heap.json' file with 
+https://nnethercote.github.io/dh_view/dh_view.html or other.
 
 ---
 
