@@ -1,4 +1,5 @@
 use core::mem::swap;
+use std::time::Instant;
 
 use lb_blend_proofs::{
     quota::{
@@ -68,7 +69,7 @@ impl ProofsVerifier for RealProofsVerifier {
     type Error = Error;
 
     fn new(public_inputs: PoQVerificationInputsMinusSigningKey) -> Self {
-        tracing::debug!("Generating new proof verifier with public inputs: {public_inputs:?}");
+        tracing::trace!("Generating new proof verifier with public inputs: {public_inputs:?}");
         Self {
             current_inputs: public_inputs,
             previous_epoch_inputs: None,
@@ -81,7 +82,7 @@ impl ProofsVerifier for RealProofsVerifier {
             swap(&mut self.current_inputs.leader, &mut new_pol_inputs);
             new_pol_inputs
         };
-        tracing::debug!(
+        tracing::trace!(
             "Transitioning epochs for proof verifier from: {old_epoch_inputs:?} to: {new_pol_inputs:?}"
         );
         self.previous_epoch_inputs = Some(old_epoch_inputs);
@@ -104,10 +105,11 @@ impl ProofsVerifier for RealProofsVerifier {
 
         // Try with current input, and if it fails, try with the previous one, if any
         // (i.e., within the epoch transition period).
-        tracing::debug!(
+        tracing::trace!(
             "Verifying proof of quota {proof:?} with session {session:?}, public core inputs: {core:?}, leader inputs: {leader:?} and signing key: {signing_key:?}."
         );
-        proof
+        let start = Instant::now();
+        let proof_verification_result = proof
             .verify(&PublicInputs {
                 core,
                 leader,
@@ -116,10 +118,10 @@ impl ProofsVerifier for RealProofsVerifier {
             })
             .or_else(|_| {
                 let Some(previous_epoch_inputs) = self.previous_epoch_inputs else {
-                    tracing::debug!("Input proof invalid and no previous epoch to try with.");
+                    tracing::debug!("Input proof invalid and no previous epoch to try with");
                     return Err(Error::ProofOfQuota(quota::Error::InvalidProof));
                 };
-                tracing::debug!(
+                tracing::trace!(
                     "Verifying same proof of quota with previous epoch leader inputs: {previous_epoch_inputs:?}."
                 );
                 proof
@@ -129,10 +131,20 @@ impl ProofsVerifier for RealProofsVerifier {
                         session,
                         signing_key: *signing_key.as_inner(),
                     })
-                    .map_err(Error::ProofOfQuota).inspect_err(|_| {
-                        tracing::debug!("Input proof invalid with both current and previous epoch public inputs.");
+                    .map_err(Error::ProofOfQuota)
+                    .inspect_err(|_| {
+                        tracing::debug!(
+                            "Input proof invalid with both current and previous epoch public inputs"
+                        );
                     })
-            })
+            });
+
+        tracing::trace!(
+            "Proof verification time: {} ms",
+            start.elapsed().as_millis()
+        );
+
+        proof_verification_result
     }
 
     fn verify_proof_of_selection(

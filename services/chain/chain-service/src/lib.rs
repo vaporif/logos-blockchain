@@ -55,7 +55,7 @@ use tokio::{
     sync::{broadcast, mpsc, oneshot, watch},
     time::Instant,
 };
-use tracing::{Level, debug, error, info, instrument, span, warn};
+use tracing::{Level, debug, error, info, instrument, span, trace, warn};
 use tracing_futures::Instrument as _;
 
 pub use crate::bootstrap::config::{BootstrapConfig, OfflineGracePeriodConfig};
@@ -564,7 +564,7 @@ where
             .await;
         // These are blocks that have been pruned by the cryptarchia engine but have not
         // yet been deleted from the storage layer.
-        let mut storage_blocks_to_remove = Self::delete_pruned_blocks_from_storage(
+        let mut storage_blocks_to_remove = Self::delete_stale_blocks_from_storage(
             pruned_blocks.stale_blocks().copied(),
             &self.state.storage_blocks_to_remove,
             relays.storage_adapter(),
@@ -871,7 +871,7 @@ where
         )
         .await?;
 
-        let storage_blocks_to_remove = Self::delete_pruned_blocks_from_storage(
+        let storage_blocks_to_remove = Self::delete_stale_blocks_from_storage(
             pruned_blocks.stale_blocks().copied(),
             storage_blocks_to_remove,
             relays.storage_adapter(),
@@ -906,7 +906,11 @@ where
     /// A [`Block`] is only added if it's valid.
     /// Otherwise, the [`Cryptarchia`] is unchanged and an error is returned.
     #[expect(clippy::allow_attributes_without_reason)]
-    #[instrument(level = "debug", skip(cryptarchia, relays))]
+    #[instrument(
+        level = "debug",
+        skip(cryptarchia, block, relays, new_block_subscription_sender, lib_broadcaster),
+        fields(block_id = %block.header().id(), tx_count = block.transactions().count(), current_slot = ?current_slot)
+    )]
     async fn process_block(
         cryptarchia: &mut Cryptarchia,
         block: Block<Tx>,
@@ -1158,7 +1162,7 @@ where
         (cryptarchia, pruned_blocks)
     }
 
-    /// Remove the pruned blocks from the storage layer.
+    /// Remove the stale blocks from the storage layer.
     ///
     /// Also, this removes the `additional_blocks` from the storage
     /// layer. These blocks might belong to previous pruning operations and
@@ -1166,13 +1170,13 @@ where
     ///
     /// This function returns any block that fails to be deleted from the
     /// storage layer.
-    async fn delete_pruned_blocks_from_storage(
-        pruned_blocks: impl Iterator<Item = HeaderId> + Send,
+    async fn delete_stale_blocks_from_storage(
+        stale_blocks: impl Iterator<Item = HeaderId> + Send,
         additional_blocks: &HashSet<HeaderId>,
         storage_adapter: &StorageAdapter<Storage, Tx, RuntimeServiceId>,
     ) -> HashSet<HeaderId> {
         match Self::delete_blocks_from_storage(
-            pruned_blocks.chain(additional_blocks.iter().copied()),
+            stale_blocks.chain(additional_blocks.iter().copied()),
             storage_adapter,
         )
         .await
@@ -1275,7 +1279,7 @@ where
                     height: tip.length(),
                 });
 
-                debug!("Sending tip response: {response:?}");
+                trace!("Sending tip response: {response:?}");
                 if let Err(e) = reply_sender.send(response).await {
                     error!("Failed to send tip header: {e}");
                 }
@@ -1329,7 +1333,7 @@ where
             error!("Could not store immutable block IDs: {e}");
         }
 
-        let storage_blocks_to_remove = Self::delete_pruned_blocks_from_storage(
+        let storage_blocks_to_remove = Self::delete_stale_blocks_from_storage(
             pruned_blocks.stale_blocks().copied(),
             storage_blocks_to_remove,
             storage_adapter,

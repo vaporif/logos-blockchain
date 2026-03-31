@@ -16,7 +16,10 @@ use lb_blend::{
     network::core::{
         NetworkBehaviourEvent,
         with_core::{
-            behaviour::{Event as CoreToCoreEvent, IntervalStreamProvider, NegotiatedPeerState},
+            behaviour::{
+                ConnectionUpgradeFailureReason, Event as CoreToCoreEvent, IntervalStreamProvider,
+                NegotiatedPeerState,
+            },
             error::Error,
         },
         with_edge::behaviour::Event as CoreToEdgeEvent,
@@ -189,7 +192,7 @@ where
             .copied()
             .collect();
 
-        tracing::debug!(target: LOG_TARGET, amount, ?except, ?exclude_peers, "Dialing random peers");
+        tracing::trace!(target: LOG_TARGET, amount, ?except, ?exclude_peers, "Dialing random peers");
 
         // We need to clone else we would not be able to call `self.dial` inside which
         // requires access to `&mut self`.
@@ -206,7 +209,7 @@ where
     /// Dial new peers, if necessary, to maintain the peering degree.
     /// We aim to have at least the peering degree number of "healthy" peers.
     fn check_and_dial_new_peers_except(&mut self, except: Option<PeerId>) {
-        tracing::debug!(target: LOG_TARGET, ?except, "Checking if we need to dial new peers");
+        tracing::trace!(target: LOG_TARGET, ?except, "Checking if we need to dial new peers");
 
         let membership_size = self.public_info.session.membership.size();
         if membership_size < self.minimum_network_size.get() {
@@ -218,14 +221,14 @@ where
             .saturating_sub(self.num_healthy_peers());
         let available_connection_slots = self.available_connection_slots();
         if num_new_conns_needed > available_connection_slots {
-            tracing::debug!(target: LOG_TARGET, "To maintain the minimum healthy peering degree the node would need to create {num_new_conns_needed} new connections, but only {available_connection_slots} slots are available.");
+            tracing::trace!(target: LOG_TARGET, "To maintain the minimum healthy peering degree the node would need to create {num_new_conns_needed} new connections, but only {available_connection_slots} slots are available.");
         }
         let connections_to_establish = num_new_conns_needed.min(available_connection_slots);
         self.dial_random_peers_except(connections_to_establish, except);
     }
 
     fn handle_disconnected_peer(&mut self, peer_id: PeerId, peer_state: NegotiatedPeerState) {
-        tracing::debug!(target: LOG_TARGET, "Peer {peer_id} disconnected with state {peer_state:?}.");
+        tracing::trace!(target: LOG_TARGET, "Peer {peer_id} disconnected with state {peer_state:?}.");
         if peer_state.is_spammy() {
             self.swarm.behaviour_mut().blocked_peers.block_peer(peer_id);
         }
@@ -233,7 +236,7 @@ where
     }
 
     fn handle_unhealthy_peer(&mut self, peer_id: PeerId) {
-        tracing::debug!(target: LOG_TARGET, "Peer {peer_id} is unhealthy");
+        tracing::trace!(target: LOG_TARGET, "Peer {peer_id} is unhealthy");
         self.check_and_dial_new_peers_except(Some(peer_id));
     }
 
@@ -257,21 +260,30 @@ where
             ) => {
                 self.handle_disconnected_peer(peer_id, peer_state);
             }
-            lb_blend::network::core::with_core::behaviour::Event::OutboundConnectionUpgradeFailed(peer_id) => {
-                // If we ran out of dial attempts, we try to connect to another random peer that we are not yet connected to, if the dial attempt was performed in the current session.
-                let SessionDialAttempt::OngoingSession(Some(_)) = self.retry_dial(peer_id) else {
-                    return;
-                };
-                self.dial_random_peers_except(1, Some(peer_id));
+            lb_blend::network::core::with_core::behaviour::Event::OutboundConnectionUpgradeFailed { peer, reason } => {
+                match reason {
+                    ConnectionUpgradeFailureReason::ConnectionFailure => {
+                        // If we ran out of dial attempts, we try to connect to another random peer that we are not yet connected to, if the dial attempt was performed in the current session.
+                        let SessionDialAttempt::OngoingSession(Some(_)) = self.retry_dial(peer) else {
+                            return;
+                        };
+                        self.check_and_dial_new_peers_except(Some(peer));
+                    }
+                    upgrade_error @ (ConnectionUpgradeFailureReason::DuplicateConnection | ConnectionUpgradeFailureReason::MaximumPeeringDegreeReached | ConnectionUpgradeFailureReason::ReverseDirectionPreferred) => {
+                        tracing::trace!(target: LOG_TARGET, "Outbound connection upgrade somewhat expectedly failed for {peer:?}. Reason: {upgrade_error:?}. Trying with a different peer if necessary.");
+                        self.ongoing_dials.remove(&peer);
+                        self.check_and_dial_new_peers_except(Some(peer));
+                    }
+                }
             }
             lb_blend::network::core::with_core::behaviour::Event::OutboundConnectionUpgradeSucceeded(peer_id) => {
                 assert!(self.ongoing_dials.remove(&peer_id).is_some(), "Peer ID for a successfully upgraded connection must be present in storage");
             }
-            lb_blend::network::core::with_core::behaviour::Event::InboundConnectionUpgradeFailed(peer_id) => {
-                tracing::warn!(target: LOG_TARGET, "Inbound connection upgrade failed for {peer_id:?}");
+            lb_blend::network::core::with_core::behaviour::Event::InboundConnectionUpgradeFailed { peer, reason } => {
+                tracing::trace!(target: LOG_TARGET, "Inbound connection upgrade expectedly failed for {peer:?} with reason {reason:?}");
             }
             lb_blend::network::core::with_core::behaviour::Event::InboundConnectionUpgradeSucceeded(peer_id) => {
-                tracing::debug!(target: LOG_TARGET, "Inbound connection upgrade succeeded for {peer_id:?}");
+                tracing::trace!(target: LOG_TARGET, "Inbound connection upgrade succeeded for {peer_id:?}");
             }
         }
     }
@@ -412,10 +424,10 @@ where
         msg: EncapsulatedMessageWithVerifiedPublicHeader,
         message_type: metrics::InboundMessageType,
     ) {
-        tracing::debug!("Received message from a peer: {msg:?}");
+        tracing::trace!("Received message from a peer: {msg:?}");
 
-        if let Err(e) = self.incoming_message_sender.send(msg) {
-            tracing::error!(target: LOG_TARGET, "Failed to send incoming message to channel: {e}");
+        if self.incoming_message_sender.send(msg).is_err() {
+            tracing::trace!(target: LOG_TARGET, "Failed to send incoming message to channel. No active listeners yet.");
             metrics::inbound_message_err(message_type);
         } else {
             metrics::inbound_message_ok();
@@ -443,7 +455,7 @@ where
     }
 
     fn handle_healthy_peer(peer_id: PeerId) {
-        tracing::debug!(target: LOG_TARGET, "Peer {peer_id} is healthy again");
+        tracing::trace!(target: LOG_TARGET, "Peer {peer_id} is healthy again");
     }
 
     fn handle_blend_edge_behaviour_event(&mut self, blend_event: CoreToEdgeEvent) {
@@ -531,7 +543,7 @@ where
                 }
             }
             _ => {
-                tracing::debug!(target: LOG_TARGET, "Received event from blend network that will be ignored.");
+                tracing::trace!(target: LOG_TARGET, "Received event from blend network that will be ignored.");
                 tracing::trace!(counter.ignored_event = 1);
             }
         }

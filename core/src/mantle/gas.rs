@@ -2,18 +2,33 @@ pub type Gas = crate::mantle::ledger::Value;
 
 pub trait GasCost {
     /// Returns the gas cost of this operation.
-    fn gas_cost<Constants: GasConstants>(&self) -> Gas;
+    fn total_gas_cost<Constants: GasConstants>(&self) -> Gas;
+    fn storage_gas_cost(&self) -> Gas;
+    fn execution_gas_consumption<Constants: GasConstants>(&self) -> Gas;
+    fn storage_gas_consumption(&self) -> Gas;
 }
 
 impl<T: GasCost> GasCost for &T {
-    fn gas_cost<Constants: GasConstants>(&self) -> Gas {
-        T::gas_cost::<Constants>(self)
+    fn total_gas_cost<Constants: GasConstants>(&self) -> Gas {
+        T::total_gas_cost::<Constants>(self)
+    }
+
+    fn storage_gas_cost(&self) -> Gas {
+        T::storage_gas_cost(self)
+    }
+
+    fn execution_gas_consumption<Constants: GasConstants>(&self) -> Gas {
+        T::execution_gas_consumption::<Constants>(self)
+    }
+
+    fn storage_gas_consumption(&self) -> Gas {
+        T::storage_gas_consumption(self)
     }
 }
 
 pub trait GasConstants {
     /// Verify the proof of ownership and relative balance.
-    const LEDGER_TX: Gas;
+    const TRANSFER: Gas;
 
     /// Verify the inscription signature.
     const CHANNEL_INSCRIBE: Gas;
@@ -37,7 +52,7 @@ pub trait GasConstants {
 pub struct MainnetGasConstants;
 
 impl GasConstants for MainnetGasConstants {
-    const LEDGER_TX: Gas = 2705;
+    const TRANSFER: Gas = 2705;
     const CHANNEL_INSCRIBE: Gas = 22;
     const CHANNEL_SET_KEYS: Gas = 22;
     const SDP_DECLARE: Gas = 2727;
