@@ -13,6 +13,8 @@ pub mod consensus;
 pub mod deployment;
 #[path = "../../../../src/topology/configs/network.rs"]
 pub mod network;
+#[path = "../../../../src/topology/configs/sdp.rs"]
+pub mod sdp;
 #[path = "../../../../src/topology/configs/time.rs"]
 pub mod time;
 #[path = "../../../../src/topology/configs/tracing.rs"]
@@ -30,8 +32,15 @@ use lb_node::config::{KmsConfig, kms::serde::PreloadKmsBackendSettings};
 use network::GeneralNetworkConfig;
 use tracing::GeneralTracingConfig;
 
-use self::{api::GeneralApiConfig, network::NetworkParams, time::GeneralTimeConfig};
-use crate::common::kms::key_id_for_preload_backend;
+use self::{
+    api::GeneralApiConfig,
+    network::NetworkParams,
+    sdp::{GeneralSdpConfig, create_sdp_configs},
+    time::GeneralTimeConfig,
+};
+use crate::{
+    common::kms::key_id_for_preload_backend, configs::node_configs::time::set_time_config,
+};
 
 const PROLONGED_BOOTSTRAP_PERIOD: Duration = Duration::from_secs(5);
 
@@ -44,6 +53,7 @@ pub struct GeneralConfig {
     pub tracing_config: GeneralTracingConfig,
     pub time_config: GeneralTimeConfig,
     pub kms_config: KmsConfig,
+    pub sdp_config: GeneralSdpConfig,
 }
 
 #[must_use]
@@ -52,6 +62,7 @@ pub fn create_general_configs_from_ids(
     blend_ports: &[u16],
     n_blend_core_nodes: usize,
     network_params: &NetworkParams,
+    test_context: Option<&str>,
 ) -> (Vec<GeneralConfig>, GenesisTx) {
     let n_nodes = ids.len();
 
@@ -69,12 +80,12 @@ pub fn create_general_configs_from_ids(
     );
 
     let (consensus_configs, genesis_tx) =
-        consensus::create_consensus_configs(ids, PROLONGED_BOOTSTRAP_PERIOD);
+        consensus::create_consensus_configs(ids, PROLONGED_BOOTSTRAP_PERIOD, test_context);
     let network_configs = network::create_network_configs(ids, network_params);
     let api_configs = api::create_api_configs(ids);
     let blend_configs = blend::create_blend_configs(ids, blend_ports);
     let tracing_configs = tracing::create_tracing_configs(ids);
-    let time_config = time::default_time_config();
+    let time_config = set_time_config();
 
     let providers: Vec<_> = blend_configs
         .iter()
@@ -92,7 +103,9 @@ pub fn create_general_configs_from_ids(
         .collect();
 
     let transfer_op = genesis_tx.genesis_transfer().clone();
-    let genesis_tx_with_declarations = create_genesis_tx_with_declarations(transfer_op, providers);
+    let genesis_tx_with_declarations =
+        create_genesis_tx_with_declarations(transfer_op, providers, test_context);
+    let sdp_configs = create_sdp_configs(&genesis_tx_with_declarations, n_nodes);
 
     let kms_configs: Vec<_> = blend_configs
         .iter()
@@ -107,6 +120,12 @@ pub fn create_general_configs_from_ids(
                     (
                         blend_conf.core.zk.secret_key_kms_id.clone(),
                         zk_secret_key.clone().into(),
+                    ),
+                    (
+                        key_id_for_preload_backend(
+                            &consensus_configs[i].blend_note.sk.clone().into(),
+                        ),
+                        consensus_configs[i].blend_note.sk.clone().into(),
                     ),
                     (
                         key_id_for_preload_backend(&consensus_configs[i].known_key.clone().into()),
@@ -133,6 +152,7 @@ pub fn create_general_configs_from_ids(
             tracing_config: tracing_configs[i].clone(),
             time_config: time_config.clone(),
             kms_config: kms_configs[i].clone(),
+            sdp_config: sdp_configs[i].clone(),
         });
     }
 

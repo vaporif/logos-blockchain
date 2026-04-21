@@ -49,7 +49,7 @@ where
 
 impl<BlendService> BlendAdapter<BlendService>
 where
-    BlendService: ServiceData<Message = ServiceMessage<BlendService::BroadcastSettings>>
+    BlendService: ServiceData<Message = ServiceMessage<BlendService::BroadcastSettings, BlendService::NodeId>>
         + lb_blend_service::ServiceComponents
         + Sync,
     <BlendService as ServiceData>::Message: Send,

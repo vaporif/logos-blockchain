@@ -122,7 +122,7 @@ where
     type Settings = StartingBlendConfig<Backend::Settings>;
     type State = NoState<Self::Settings>;
     type StateOperator = NoOperator<Self::State>;
-    type Message = ServiceMessage<BroadcastSettings>;
+    type Message = ServiceMessage<BroadcastSettings, NodeId>;
 }
 
 #[expect(clippy::too_many_lines, reason = "TODO: Address this at some point.")]
@@ -199,7 +199,7 @@ where
 
         wait_until_services_are_ready!(
             &overwatch_handle,
-            Some(Duration::from_secs(60)),
+            Some(Duration::from_mins(1)),
             TimeService<_, _>,
             <MembershipAdapter as membership::Adapter>::Service,
             PreloadKmsService<_>
@@ -256,11 +256,20 @@ where
         }
         .await;
 
-        let messages_to_blend_stream = inbound_relay.map(|ServiceMessage::Blend(message)| {
-            NetworkMessage::<BroadcastSettings>::to_bytes(&message)
-                .expect("NetworkMessage should be able to be serialized")
-                .to_vec()
-        });
+        let messages_to_blend_stream = Box::pin(inbound_relay.filter_map(async |msg| {
+            match msg {
+                ServiceMessage::Blend(message) => Some(
+                    NetworkMessage::<BroadcastSettings>::to_bytes(&message)
+                        .expect("NetworkMessage should be able to be serialized")
+                        .to_vec(),
+                ),
+                ServiceMessage::GetNetworkInfo { reply } => {
+                    // Edge nodes don't return any Blend peer info.
+                    drop(reply.send(None));
+                    None
+                }
+            }
+        }));
 
         let epoch_handler = async {
             let chain_service = CryptarchiaServiceApi::<ChainService, _>::new(
@@ -330,6 +339,10 @@ where
 /// # Panics
 /// - If the initial membership is not yielded immediately from the session
 ///   stream.
+#[expect(
+    clippy::cognitive_complexity,
+    reason = "TODO: address this in a dedicated refactor"
+)]
 async fn run<Backend, NodeId, ProofsGenerator, ChainService, PolInfoProvider, RuntimeServiceId>(
     session_stream: UninitializedSessionEventStream<
         impl Stream<Item = MembershipInfo<NodeId>> + Unpin,
@@ -482,7 +495,7 @@ where
         settings,
         new_membership_info.membership.clone(),
         new_public_inputs,
-        &current_epoch_private_info.poq_private_inputs,
+        current_epoch_private_info.poq_private_inputs.clone(),
         overwatch_handle,
         current_epoch_private_info.epoch,
     )?;
@@ -582,10 +595,10 @@ fn handle_new_secret_epoch_info<Backend, NodeId, ProofsGenerator, RuntimeService
         settings,
         current_membership,
         new_public_inputs,
-        &new_pol_epoch_info.poq_private_inputs,
+        new_pol_epoch_info.poq_private_inputs.clone(),
         overwatch_handle.clone(),
         new_pol_epoch_info.epoch,
     ).expect("Should not fail to re-create message handler on epoch rotation after private inputs are set.");
 
-    *current_epoch_info_and_message_handler = Some((*new_pol_epoch_info, new_handler));
+    *current_epoch_info_and_message_handler = Some((new_pol_epoch_info.clone(), new_handler));
 }

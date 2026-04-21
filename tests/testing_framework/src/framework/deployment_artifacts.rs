@@ -21,7 +21,7 @@ use crate::{
 };
 
 #[derive(Debug, Error)]
-pub(crate) enum ArtifactError {
+pub enum ArtifactError {
     #[error("deployment plan is missing `genesis_tx`")]
     MissingGenesisTx,
     #[error("runtime hostname count ({hostnames}) does not match node count ({nodes})")]
@@ -35,7 +35,7 @@ pub(crate) enum ArtifactError {
     },
 }
 
-pub(crate) fn add_shared_deployment_file(
+pub fn add_shared_deployment_file(
     topology: &DeploymentPlan,
     hostnames: &[String],
     materialized: &mut MaterializedArtifacts,
@@ -48,7 +48,7 @@ pub(crate) fn add_shared_deployment_file(
 
     let mut shared = materialized.shared().clone();
     shared.files.push(ArtifactFile::new(
-        "/deployment.yaml".to_string(),
+        "/deployment.yaml".to_owned(),
         deployment_yaml,
     ));
 
@@ -82,9 +82,17 @@ fn deployment_settings(
         .clone()
         .ok_or(ArtifactError::MissingGenesisTx)?;
 
-    let providers = collect_runtime_blend_providers(topology.nodes(), hostnames)?;
+    let providers = collect_runtime_blend_providers(
+        topology.nodes(),
+        hostnames,
+        topology.config().blend_core_nodes,
+    )?;
     let transfer_op = genesis_tx.genesis_transfer().clone();
-    let genesis_tx = create_genesis_tx_with_declarations(transfer_op, providers);
+    let genesis_tx = create_genesis_tx_with_declarations(
+        transfer_op,
+        providers,
+        topology.config.test_context.as_deref(),
+    );
 
     Ok(default_e2e_deployment_settings(genesis_tx))
 }
@@ -92,6 +100,7 @@ fn deployment_settings(
 fn collect_runtime_blend_providers(
     nodes: &[NodePlan],
     hostnames: &[String],
+    n_blend_core_nodes: usize,
 ) -> Result<Vec<ProviderInfo>> {
     if nodes.len() != hostnames.len() {
         return Err(ArtifactError::HostnameCountMismatch {
@@ -101,9 +110,14 @@ fn collect_runtime_blend_providers(
         .into());
     }
 
-    let mut providers = Vec::with_capacity(nodes.len());
+    let mut providers = Vec::with_capacity(n_blend_core_nodes);
 
-    for (index, (node, hostname)) in nodes.iter().zip(hostnames.iter()).enumerate() {
+    for (index, (node, hostname)) in nodes
+        .iter()
+        .zip(hostnames.iter())
+        .take(n_blend_core_nodes)
+        .enumerate()
+    {
         let port = blend_udp_port(node, index)?;
         let locator = runtime_blend_locator(hostname, port);
         let (_, provider_sk, zk_sk) = &node.general.blend_config;
@@ -132,7 +146,7 @@ fn blend_udp_port(node: &NodePlan, node_index: usize) -> Result<u16> {
             Protocol::Udp(port) => Some(port),
             _ => None,
         })
-        .ok_or(ArtifactError::MissingBlendPort { node_index }.into())
+        .ok_or_else(|| ArtifactError::MissingBlendPort { node_index }.into())
 }
 
 fn runtime_blend_locator(hostname: &str, port: u16) -> Locator {

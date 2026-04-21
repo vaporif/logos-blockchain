@@ -40,13 +40,16 @@ use utoipa::OpenApi as _;
 use utoipa_swagger_ui::SwaggerUi;
 
 use super::handlers::{
-    add_tx, block, blocks, blocks_stream, cryptarchia_headers, cryptarchia_info,
-    cryptarchia_lib_stream, libp2p_info, mantle_metrics, mantle_status, wallet,
+    add_tx, blend_info, block, blocks, blocks_stream, cryptarchia_headers, cryptarchia_info,
+    cryptarchia_lib_stream, libp2p_info, mantle_metrics, mantle_status, transaction, wallet,
 };
 use crate::{
-    WalletService,
+    BlendBroadcastSettings, BlendService, WalletService,
     api::{
-        handlers::{leader_claim, post_activity, post_declaration, post_withdrawal},
+        handlers::{
+            channel, channel_deposit, leader_claim, post_activity, post_declaration,
+            post_withdrawal,
+        },
         openapi::ApiDoc,
     },
 };
@@ -150,7 +153,8 @@ where
             >,
         >
         + AsServiceId<WalletService>
-        + AsServiceId<ChainLeader>,
+        + AsServiceId<ChainLeader>
+        + AsServiceId<BlendService>,
 {
     type Error = std::io::Error;
     type Settings = AxumBackendSettings;
@@ -208,12 +212,19 @@ where
                 routing::get(libp2p_info::<RuntimeServiceId>),
             )
             .route(
-                paths::STORAGE_BLOCK,
-                routing::post(block::<StorageAdapter, RuntimeServiceId>),
+                paths::BLEND_NETWORK_INFO,
+                routing::get(blend_info::<BlendService, BlendBroadcastSettings, RuntimeServiceId>),
             )
             .route(
                 paths::MEMPOOL_ADD_TX,
                 routing::post(add_tx::<MempoolStorageAdapter, RuntimeServiceId>),
+            )
+            .route(paths::CHANNEL, routing::get(channel::<RuntimeServiceId>))
+            .route(
+                paths::CHANNEL_DEPOSIT,
+                routing::post(
+                    channel_deposit::<WalletService, MempoolStorageAdapter, RuntimeServiceId>,
+                ),
             )
             .route(
                 paths::SDP_POST_DECLARATION,
@@ -265,6 +276,14 @@ where
                         _,
                     >,
                 ),
+            )
+            .route(
+                paths::wallet::SIGN_TX_ED25519,
+                routing::post(wallet::sign_tx_ed25519::<WalletService, MempoolStorageAdapter, _>),
+            )
+            .route(
+                paths::wallet::SIGN_TX_ZK,
+                routing::post(wallet::sign_tx_zk::<WalletService, MempoolStorageAdapter, _>),
             );
 
         let app = app.route(
@@ -278,10 +297,19 @@ where
             ),
         );
 
-        let app = app.route(
-            paths::BLOCKS,
-            routing::get(blocks::<BlockStorageBackend, RuntimeServiceId>),
-        );
+        let app = app
+            .route(
+                paths::BLOCKS,
+                routing::get(blocks::<BlockStorageBackend, RuntimeServiceId>),
+            )
+            .route(
+                paths::BLOCKS_DETAIL,
+                routing::get(block::<StorageAdapter, RuntimeServiceId>),
+            )
+            .route(
+                paths::TRANSACTION,
+                routing::get(transaction::<StorageAdapter, RuntimeServiceId>),
+            );
 
         let app = app
             .with_state(handle.clone())

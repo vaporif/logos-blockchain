@@ -7,7 +7,7 @@ ARG VERSION=v0.4.2
 # ===========================
 # BUILD IMAGE
 # ===========================
-FROM rust:1.94.0-slim-bookworm AS builder
+FROM rust:1.95.0-slim-bookworm AS builder
 
 ARG VERSION
 
@@ -16,7 +16,7 @@ COPY . .
 
 # Install dependencies needed for building RocksDB.
 RUN apt-get update && apt-get install -yq \
-    git gcc g++ clang libssl-dev pkg-config ca-certificates curl unzip
+    build-essential git clang libssl-dev pkg-config ca-certificates curl unzip
 
 # Install Bun for L2 demo frontend.
 RUN curl -fsSL https://bun.sh/install | bash
@@ -31,7 +31,7 @@ RUN VITE_SEQUENCER_URL=/api/sequencer VITE_ARCHIVER_URL=/api/archiver bun run bu
 WORKDIR /logos-blockchain
 ENV LOGOS_BLOCKCHAIN_CIRCUITS=/opt/circuits
 RUN scripts/setup-logos-blockchain-circuits.sh "$VERSION" "$LOGOS_BLOCKCHAIN_CIRCUITS"
-RUN cargo build --locked --release --all-features
+RUN cargo build --locked --release
 
 # ===========================
 # NODE IMAGE
@@ -45,7 +45,7 @@ LABEL maintainer="augustinas@status.im" \
     description="Logos Blockchain node and other binaries image"
 
 RUN apt-get update && apt-get install -yq \
-    libstdc++6 libssl3 ca-certificates nginx \
+    libstdc++6 libssl3 ca-certificates \
     python3 python3-pip curl git \
     && rm -rf /var/lib/apt/lists/*
 

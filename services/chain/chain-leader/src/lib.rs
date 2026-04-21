@@ -1,6 +1,5 @@
 pub mod api;
 mod blend;
-mod block;
 mod kms;
 mod leadership;
 mod mempool;
@@ -11,27 +10,23 @@ use core::fmt::Debug;
 use std::{fmt::Display, iter, pin::Pin, time::Duration};
 
 use futures::{StreamExt as _, stream};
-use lb_chain_network_service::api::{ChainNetworkServiceApi, ChainNetworkServiceData};
+use lb_chain_network_service::api::ChainNetworkServiceData;
 use lb_chain_service::{
     Epoch,
     api::{CryptarchiaServiceApi, CryptarchiaServiceData},
 };
-use lb_chain_service_common::NetworkMessage as ChainNetworkMessage;
 use lb_core::{
     block::{Block, Error as BlockError, MAX_BLOCK_TRANSACTIONS},
-    codec::SerializeOp as _,
     header::HeaderId,
     mantle::{
         AuthenticatedMantleTx, SignedMantleTx, Transaction, TxHash, TxSelect,
         gas::MainnetGasConstants, ops::leader_claim::LeaderClaimOp,
     },
     proofs::leader_proof::{Groth16LeaderProof, LeaderPrivate, LeaderPublic},
-    sdp::ServiceType,
 };
 use lb_cryptarchia_engine::Slot;
 use lb_key_management_system_service::{api::KmsServiceApi, keys::Ed25519Key};
 use lb_ledger::LedgerState;
-use lb_network_service::NetworkService;
 use lb_services_utils::wait_until_services_are_ready;
 use lb_time_service::{SlotTick, TimeService, TimeServiceMessage};
 use lb_tx_service::{
@@ -54,7 +49,6 @@ use tracing_futures::Instrument as _;
 pub use crate::wallet::LeaderWalletConfig;
 use crate::{
     blend::BlendAdapter,
-    block::BlockProposalStrategy,
     kms::PreloadKmsService,
     leadership::{PotentialWinningPoLSlotNotifier, claim_leadership, generate_leader_proof},
     mempool::{MempoolAdapter as _, adapter::MempoolAdapter},
@@ -81,7 +75,7 @@ pub enum Error {
     #[error("Failed to create valid block during proposal: {0}")]
     BlockCreation(#[from] BlockError),
     #[error("Wallet API error: {0}")]
-    Wallet(#[from] WalletApiError),
+    Wallet(#[from] Box<WalletApiError>),
     #[error("Leader wallet error: {0}")]
     LeaderWallet(#[from] LeaderWalletError),
     #[error("Mempool error: {0}")]
@@ -92,6 +86,12 @@ pub enum Error {
     NoClaimableVoucher,
     #[error("Ledger state not found for {0:?}")]
     LedgerStateNotFound(HeaderId),
+}
+
+impl From<WalletApiError> for Error {
+    fn from(error: WalletApiError) -> Self {
+        Self::Wallet(Box::new(error))
+    }
 }
 
 #[derive(Debug)]
@@ -133,7 +133,6 @@ pub struct CryptarchiaLeader<
     CryptarchiaService,
     ChainNetwork,
     Wallet,
-    NetworkAdapter,
     RuntimeServiceId,
 > where
     BlendService: lb_blend_service::ServiceComponents,
@@ -167,7 +166,6 @@ impl<
     CryptarchiaService,
     ChainNetwork,
     Wallet,
-    NetworkAdapter,
     RuntimeServiceId,
 > ServiceData
     for CryptarchiaLeader<
@@ -179,7 +177,6 @@ impl<
         CryptarchiaService,
         ChainNetwork,
         Wallet,
-        NetworkAdapter,
         RuntimeServiceId,
     >
 where
@@ -216,7 +213,6 @@ impl<
     CryptarchiaService,
     ChainNetwork,
     Wallet,
-    NetworkAdapter,
     RuntimeServiceId,
 > ServiceCore<RuntimeServiceId>
     for CryptarchiaLeader<
@@ -228,13 +224,15 @@ impl<
         CryptarchiaService,
         ChainNetwork,
         Wallet,
-        NetworkAdapter,
         RuntimeServiceId,
     >
 where
     BlendService: ServiceData<
-            Message = lb_blend_service::message::ServiceMessage<BlendService::BroadcastSettings>,
-        > + lb_blend_service::ServiceComponents
+            Message = lb_blend_service::message::ServiceMessage<
+                BlendService::BroadcastSettings,
+                BlendService::NodeId,
+            >,
+        > + lb_blend_service::ServiceComponents<NodeId: Send + Sync>
         + Send
         + Sync
         + 'static,
@@ -270,12 +268,6 @@ where
     CryptarchiaService: CryptarchiaServiceData<Tx = Mempool::Item>,
     ChainNetwork: ChainNetworkServiceData<Tx = Mempool::Item>,
     Wallet: lb_wallet_service::api::WalletServiceData,
-    NetworkAdapter: lb_blend_service::core::network::NetworkAdapter<
-            RuntimeServiceId,
-            BroadcastSettings = BlendService::BroadcastSettings,
-        > + Send
-        + Sync
-        + 'static,
     RuntimeServiceId: Debug
         + Send
         + Sync
@@ -290,8 +282,7 @@ where
         + AsServiceId<CryptarchiaService>
         + AsServiceId<ChainNetwork>
         + AsServiceId<Wallet>
-        + AsServiceId<PreloadKmsService<RuntimeServiceId>>
-        + AsServiceId<NetworkService<NetworkAdapter::Backend, RuntimeServiceId>>,
+        + AsServiceId<PreloadKmsService<RuntimeServiceId>>,
 {
     fn init(
         service_resources_handle: OpaqueServiceResourcesHandle<Self, RuntimeServiceId>,
@@ -321,14 +312,6 @@ where
                 .relay::<CryptarchiaService>()
                 .await
                 .expect("Failed to estabilish connection with Cryptarchia"),
-        );
-
-        let chain_network_api = ChainNetworkServiceApi::<ChainNetwork, RuntimeServiceId>::new(
-            self.service_resources_handle
-                .overwatch_handle
-                .relay::<ChainNetwork>()
-                .await
-                .expect("Failed to estabilish connection with ChainNetwork"),
         );
 
         let LeaderSettings {
@@ -369,26 +352,24 @@ where
             blend_broadcast_settings.clone(),
         );
 
-        // Wait for other service (except ChainLeader) to become ready, with timeout.
+        // Wait for other services to become ready, with timeout.
+        // (except Chain and ChainLeader)
         wait_until_services_are_ready!(
             &self.service_resources_handle.overwatch_handle,
-            Some(Duration::from_secs(60)),
+            Some(Duration::from_mins(1)),
             BlendService,
             TxMempoolService<_, _, _, _>,
             TimeService<_, _>,
-            CryptarchiaService,
             Wallet,
-            PreloadKmsService<_>,
-            // TODO: Remove once the need to broadcast directly bypassing Blend is gone.
-            NetworkService<_, _>
+            PreloadKmsService<_>
         )
         .await?;
-        // Wait for ChainLeader service to become ready.
-        // No timeout since it becomes ready only after IBD is complete.
+        // Wait for Chain and ChainLeader services to become ready, without timeout
         wait_until_services_are_ready!(
             &self.service_resources_handle.overwatch_handle,
             None,
-            ChainNetwork
+            CryptarchiaService, // becomes ready after recoverying blocks
+            ChainNetwork        // becomes ready after IBD
         )
         .await?;
 
@@ -410,9 +391,6 @@ where
             .await
             .expect("Waiting for chain to be online should succeed");
         info!("Chain is now Online. Starting block proposals.");
-
-        // TODO: Remove once the need to broadcast directly bypassing Blend is gone.
-        let network_adapter = NetworkAdapter::new(relays.network_relay().clone());
 
         self.service_resources_handle.status_updater.notify_ready();
         info!(
@@ -492,16 +470,8 @@ where
                             )
                             .await
                             {
-                                Ok((block, new_blend_session)) => {
-                                    let proposal_strategy = if new_blend_session {
-                                        BlockProposalStrategy::Broadcast {
-                                            adapter: &network_adapter,
-                                            settings: blend_broadcast_settings.clone(),
-                                        }
-                                    } else {
-                                        BlockProposalStrategy::Blend(&blend_adapter)
-                                    };
-                                    Self::apply_and_publish_block_proposal(block, &chain_network_api, proposal_strategy).await;
+                                Ok(block) => {
+                                    Self::publish_block_proposal(block, &blend_adapter).await;
                                 }
                                 Err(e) => {
                                     error!(target: LOG_TARGET, "{e}");
@@ -539,7 +509,6 @@ impl<
     CryptarchiaService,
     ChainNetwork,
     Wallet,
-    NetworkAdapter,
     RuntimeServiceId,
 >
     CryptarchiaLeader<
@@ -551,13 +520,15 @@ impl<
         CryptarchiaService,
         ChainNetwork,
         Wallet,
-        NetworkAdapter,
         RuntimeServiceId,
     >
 where
     BlendService: ServiceData<
-            Message = lb_blend_service::message::ServiceMessage<BlendService::BroadcastSettings>,
-        > + lb_blend_service::ServiceComponents
+            Message = lb_blend_service::message::ServiceMessage<
+                BlendService::BroadcastSettings,
+                BlendService::NodeId,
+            >,
+        > + lb_blend_service::ServiceComponents<NodeId: Send + Sync>
         + Send
         + Sync
         + 'static,
@@ -593,12 +564,6 @@ where
     CryptarchiaService: CryptarchiaServiceData<Tx = Mempool::Item>,
     ChainNetwork: ChainNetworkServiceData<Tx = Mempool::Item>,
     Wallet: lb_wallet_service::api::WalletServiceData,
-    NetworkAdapter: lb_blend_service::core::network::NetworkAdapter<
-            RuntimeServiceId,
-            BroadcastSettings = BlendService::BroadcastSettings,
-        > + Send
-        + Sync
-        + 'static,
     RuntimeServiceId: Debug + Display + Sync + Send + 'static + AsServiceId<Wallet>,
 {
     #[expect(clippy::allow_attributes_without_reason)]
@@ -620,12 +585,11 @@ where
             BlendService,
             Mempool,
             MempoolNetAdapter,
-            NetworkAdapter::Backend,
             RuntimeServiceId,
         >,
         mut ledger_state: LedgerState,
         ledger_config: &lb_ledger::Config,
-    ) -> Result<(Block<Mempool::Item>, bool), Error> {
+    ) -> Result<Block<Mempool::Item>, Error> {
         let txs_stream = relays
             .mempool_adapter()
             .get_mempool_view([0; 32].into())
@@ -634,28 +598,9 @@ where
 
         let mut tx_stream: Pin<Box<_>> = Box::pin(txs_stream);
 
-        let blend_session_before = *ledger_state
-            .active_sessions()
-            .get(&ServiceType::BlendNetwork)
-            .unwrap_or_else(|| {
-                tracing::warn!(target: LOG_TARGET, "No active session found for Blend in ledger state before applying block. Defaulting to 0.");
-                &0
-            });
-
         ledger_state = ledger_state
             .clone()
             .try_apply_header::<Groth16LeaderProof, HeaderId>(slot, &proof, ledger_config)?;
-
-        let blend_session_after = *ledger_state
-            .active_sessions()
-            .get(&ServiceType::BlendNetwork)
-            .unwrap_or_else(|| {
-                tracing::warn!(target: LOG_TARGET, "No active session found for Blend in ledger state after applying block. Defaulting to 0.");
-                &0
-            });
-
-        let is_new_blend_session =
-            blend_session_after > blend_session_before && blend_session_after > 0;
 
         let mut valid_txs = Vec::new();
         let mut invalid_tx_hashes = Vec::new();
@@ -708,48 +653,23 @@ where
             invalid_tx_hashes.len()
         );
 
-        Ok((block, is_new_blend_session))
+        Ok(block)
     }
 
-    /// Apply our own proposed block to the chain and publish it to the blend
-    /// network.
-    async fn apply_and_publish_block_proposal(
+    /// Publish our own proposed block to the blend network.
+    async fn publish_block_proposal(
         block: Block<Mempool::Item>,
-        chain_network_api: &ChainNetworkServiceApi<ChainNetwork, RuntimeServiceId>,
-        proposal_strategy: BlockProposalStrategy<
-            '_,
-            BlendService,
-            NetworkAdapter,
-            RuntimeServiceId,
-        >,
+        blend_adapter: &BlendAdapter<BlendService>,
     ) {
-        if let Err(e) = chain_network_api
-            .apply_block_and_reconcile_mempool(block.clone())
-            .await
-        {
-            error!(target: LOG_TARGET, "Failed to apply our own proposed block {:?}: {e:?}", block.header().id());
-            return;
-        }
+        // TODO: enable this once we elimnate sessions from Blend and so on
+        // Now we're disabling this to avoid a case which a proposing node
+        // transitions to a new session much earlier than other nodes.
+        debug!(
+            target: LOG_TARGET, header_id = ?block.header().id(),
+            "skipping self-applying block and just publishing it",
+        );
 
-        match proposal_strategy {
-            BlockProposalStrategy::Blend(blend_adapter) => {
-                debug!(target: LOG_TARGET, "Successfully applied our own proposed block. Publishing it to the blend network: {:?}", block.header().id());
-                blend_adapter.publish_proposal(block.to_proposal()).await;
-            }
-            BlockProposalStrategy::Broadcast { adapter, settings } => {
-                debug!(target: LOG_TARGET, "Successfully applied our own proposed block. First of a new Blend session, broadcasting it directly: {:?}", block.header().id());
-                adapter
-                    .broadcast(
-                        ChainNetworkMessage::to_bytes(&ChainNetworkMessage::Proposal(
-                            block.to_proposal(),
-                        ))
-                        .expect("NetworkMessage should be able to be serialized")
-                        .to_vec(),
-                        settings,
-                    )
-                    .await;
-            }
-        }
+        blend_adapter.publish_proposal(block.to_proposal()).await;
     }
 
     async fn handle_inbound_message(
@@ -802,11 +722,13 @@ where
             .ok_or(Error::NoClaimableVoucher)?
             .nullifier;
 
+        let reward_amount = ledger_state.mantle_ledger().leader_reward_amount();
         let signed_tx = fund_and_sign_leader_claim_tx(
             LeaderClaimOp {
                 rewards_root: ledger_state.mantle_ledger().claimable_vouchers_root(),
                 voucher_nullifier,
             },
+            reward_amount,
             tip,
             wallet,
             config,

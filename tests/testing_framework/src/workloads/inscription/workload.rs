@@ -9,6 +9,7 @@ use std::{
 use async_trait::async_trait;
 use lb_core::mantle::{
     MantleTx, SignedMantleTx, Transaction as _,
+    genesis_tx::GENESIS_STORAGE_GAS_PRICE,
     ops::{
         Op, OpProof,
         channel::{ChannelId, MsgId, inscribe::InscriptionOp},
@@ -163,7 +164,7 @@ impl<'a, E: LbcScenarioEnv + LbcBlockFeedEnv> InscriptionRunner<'a, E> {
         Ok(Self {
             channels,
             pending_by_hash: HashMap::new(),
-            feed: E::block_feed_subscription(ctx),
+            feed: E::block_feed_subscription(ctx)?,
             ctx,
             payload_bytes: workload.payload_bytes.get(),
             min_confirmed: workload.min_confirmed,
@@ -240,7 +241,6 @@ impl<'a, E: LbcScenarioEnv + LbcBlockFeedEnv> InscriptionRunner<'a, E> {
         let Some(channel) = self.channels.get_mut(channel_idx) else {
             return Ok(());
         };
-
         let (tx, msg_id, tx_hash) = build_inscription_transaction(channel, self.payload_bytes)?;
         submit_transaction_via_cluster(self.ctx, Arc::new(tx)).await?;
 
@@ -284,8 +284,8 @@ impl<'a, E: LbcScenarioEnv + LbcBlockFeedEnv> InscriptionRunner<'a, E> {
     }
 
     fn process_block(&mut self, block: &BlockRecord) {
-        for observed in &block.new_blocks {
-            for tx in observed.block.transactions() {
+        for observed in &block.events {
+            for tx in &observed.block.transactions {
                 let tx_hash = tx.hash();
                 let Some(channel_idx) = self.pending_by_hash.remove(&tx_hash) else {
                     continue;
@@ -391,8 +391,8 @@ fn build_inscription_transaction(
 
     let mantle_tx = MantleTx {
         ops: vec![Op::ChannelInscribe(op)],
-        storage_gas_price: 0,
-        execution_gas_price: 0,
+        storage_gas_price: GENESIS_STORAGE_GAS_PRICE,
+        execution_gas_price: 0.into(),
     };
     let tx_hash = mantle_tx.hash();
 

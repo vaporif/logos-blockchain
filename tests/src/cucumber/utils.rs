@@ -4,6 +4,8 @@ use std::{
     time::Duration,
 };
 
+use hex::ToHex as _;
+use lb_core::codec::SerializeOp as _;
 use lb_libp2p::{PeerId, identity, identity::ed25519};
 use lb_node::UserConfig;
 use lb_testing_framework::{CoreBuilderExt as _, ScenarioBuilder};
@@ -27,13 +29,6 @@ pub fn make_builder(topology: &TopologySpec) -> ScenarioBuilderWith {
         base.nodes(topology.nodes.get())
             .scenario_base_dir(topology.scenario_base_dir.clone())
     })
-}
-
-#[must_use]
-pub fn is_truthy_env(key: &str) -> bool {
-    env::var(key)
-        .ok()
-        .is_some_and(|value| matches!(value.as_str(), "1" | "true" | "TRUE" | "yes" | "YES"))
 }
 
 pub fn resolve_literal_or_env(value: &str, field_name: &str) -> Result<String, StepError> {
@@ -84,6 +79,10 @@ pub fn shared_host_bin_path(binary_name: &str) -> PathBuf {
     cucumber_dir.join("../assets/stack/bin").join(binary_name)
 }
 
+#[expect(
+    clippy::cognitive_complexity,
+    reason = "Singular fn with multiple branches to handle different events and futures."
+)]
 pub async fn track_progress<Fut>(operation: &str, interval: Duration, wait: Fut) -> StepResult
 where
     Fut: Future<Output = StepResult>,
@@ -165,24 +164,11 @@ fn user_config_from_node_yaml(path: &Path) -> Result<UserConfig, StepError> {
     Ok(config)
 }
 
-/// Reads a node YAML user config file and extracts the funding wallet public
-/// key. Returns the key from `wallet.known_keys` that is not the
-/// `voucher_master_key_id`.
+/// Reads a node YAML user config file and extracts the configured SDP funding
+/// wallet public key.
 pub fn funding_wallet_pk_from_node_yaml(path: &Path) -> Result<String, StepError> {
     let config = user_config_from_node_yaml(path)?;
-
-    config
-        .wallet
-        .known_keys
-        .keys()
-        .find(|&key| key != &config.wallet.voucher_master_key_id)
-        .cloned()
-        .ok_or_else(|| StepError::LogicalError {
-            message: format!(
-                "No wallet public key found in 'wallet.known_keys' (other than voucher_master_key_id) in '{}'",
-                path.display()
-            ),
-        })
+    Ok(config.sdp.wallet.funding_pk.to_bytes()?.encode_hex())
 }
 
 /// Extracts the child directory name that starts with a known prefix,
@@ -198,7 +184,7 @@ pub fn extract_child_dir_name(
 
     let mut matching_dirs = Vec::new();
     for entry in entries.filter_map(Result::ok) {
-        if !entry.file_type().map(|ft| ft.is_dir()).unwrap_or(false) {
+        if !entry.file_type().is_ok_and(|ft| ft.is_dir()) {
             continue;
         }
         let name = entry.file_name().to_string_lossy().to_string();
@@ -215,7 +201,7 @@ pub fn extract_child_dir_name(
             message: format!("No directory found starting with {prefix}"),
         }),
         _ => Err(StepError::LogicalError {
-            message: format!("Ambiguous: multiple dirs match {prefix}: {matching_dirs:?}",),
+            message: format!("Ambiguous: multiple dirs match {prefix}: {matching_dirs:?}"),
         }),
     }
 }
@@ -230,7 +216,7 @@ pub fn matching_child_dirs(partial_persist_dir: &Path, prefix: &str) -> Vec<Stri
         |entries| {
             entries
                 .filter_map(Result::ok)
-                .filter(|entry| entry.file_type().map(|ft| ft.is_dir()).unwrap_or(false))
+                .filter(|entry| entry.file_type().is_ok_and(|ft| ft.is_dir()))
                 .filter_map(|entry| {
                     let name = entry.file_name().to_string_lossy().to_string();
                     name.starts_with(prefix).then_some(name)
