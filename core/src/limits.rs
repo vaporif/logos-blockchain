@@ -1,6 +1,4 @@
 //! Block, message, and transport size limits.
-//!
-//! Collected here so cross-layer relationships are visible in one place.
 
 /// 1 MiB — total transaction bytes in a single block.
 pub const MAX_BLOCK_SIZE: usize = 1024 * 1024;
