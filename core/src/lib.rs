@@ -3,6 +3,7 @@ pub mod block;
 pub mod codec;
 pub mod crypto;
 pub mod header;
+pub mod limits;
 pub mod mantle;
 pub mod proofs;
 pub mod sdp;

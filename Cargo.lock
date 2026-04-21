@@ -4868,6 +4868,7 @@ dependencies = [
  "igd-next 0.16.2",
  "libp2p",
  "libp2p-swarm-test",
+ "logos-blockchain-core",
  "logos-blockchain-cryptarchia-sync",
  "logos-blockchain-utils",
  "multiaddr",

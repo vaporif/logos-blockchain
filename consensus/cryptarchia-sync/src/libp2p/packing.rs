@@ -2,6 +2,7 @@ use std::io;
 
 use futures::{AsyncReadExt, AsyncWriteExt};
 use lb_core::codec::{self, DeserializeOp as _, SerializeOp as _};
+use lb_core::limits::MAX_SYNC_MESSAGE_SIZE;
 use serde::{Serialize, de::DeserializeOwned};
 use thiserror::Error;
 
@@ -9,7 +10,6 @@ type Result<T> = std::result::Result<T, PackingError>;
 
 type LenType = u32;
 const MAX_MSG_LEN_BYTES: usize = size_of::<LenType>();
-const MAX_MSG_LEN: usize = 16 * 1024 * 1024; // 16 MiB;
 
 #[derive(Debug, Error)]
 pub enum PackingError {
@@ -35,7 +35,7 @@ where
             .len()
             .try_into()
             .map_err(|_| PackingError::MessageTooLarge {
-                max: MAX_MSG_LEN,
+                max: MAX_SYNC_MESSAGE_SIZE,
                 actual: packed_message.len(),
             })?;
 

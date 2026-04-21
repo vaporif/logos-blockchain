@@ -44,7 +44,8 @@ pub const fn default_max_body_size() -> usize {
     // - JSON structure (quotes, braces, commas): adds 10-20% typically.
     // - Combined realistic overhead: ~1.5-1.6× for Base64-encoded binary data in
     //   JSON.
-    10 * 1024 * 1024
+    // 10x MAX_BLOCK_SIZE covers the worst-case JSON envelope.
+    lb_core::limits::MAX_BLOCK_SIZE * 10
 }
 
 const fn default_max_concurrent_requests() -> usize {

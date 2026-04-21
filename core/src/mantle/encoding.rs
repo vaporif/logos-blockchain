@@ -507,7 +507,7 @@ use lb_groth16::fr_to_bytes;
 
 use super::ops::opcode;
 use crate::{
-    block::MAX_BLOCK_SIZE,
+    limits::MAX_BLOCK_SIZE,
     mantle::{
         ops::channel::{ChannelKeyIndex, withdraw::ChannelWithdrawOp},
         tx::MantleTxGasContext,

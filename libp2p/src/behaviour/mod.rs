@@ -5,6 +5,7 @@
 
 use std::error::Error;
 
+use lb_core::limits::MAX_GOSSIPSUB_MESSAGE_SIZE;
 use lb_cryptarchia_sync::ChainSyncError;
 use libp2p::{PeerId, StreamProtocol, autonat, identify, identity, kad, swarm::NetworkBehaviour};
 use rand::RngCore;
@@ -18,8 +19,6 @@ pub mod chainsync;
 pub mod gossipsub;
 pub mod kademlia;
 pub mod nat;
-
-const DATA_LIMIT: usize = 16 * 1024 * 1024; // 16 MiB (gossipsub default is 64 KiB)
 
 pub(crate) struct BehaviourConfig {
     pub gossipsub_config: libp2p::gossipsub::Config,
@@ -74,7 +73,7 @@ impl<Rng: Clone + Send + RngCore + 'static> Behaviour<Rng> {
             libp2p::gossipsub::ConfigBuilder::from(gossipsub_config)
                 .validation_mode(libp2p::gossipsub::ValidationMode::None)
                 .message_id_fn(compute_message_id)
-                .max_transmit_size(DATA_LIMIT)
+                .max_transmit_size(MAX_GOSSIPSUB_MESSAGE_SIZE)
                 .build()?,
         )?;
 

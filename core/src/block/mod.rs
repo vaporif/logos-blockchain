@@ -2,10 +2,10 @@ pub mod genesis;
 
 use core::fmt::Debug;
 
-use ::serde::{Deserialize, Serialize, de::DeserializeOwned};
 use bytes::Bytes;
 use lb_cryptarchia_engine::Slot;
 use lb_key_management_system_keys::keys::{Ed25519Key, Ed25519Signature};
+use serde::{Deserialize, Serialize, de::DeserializeOwned};
 
 use crate::{
     codec::{DeserializeOp as _, SerializeOp as _},
@@ -15,8 +15,7 @@ use crate::{
     utils::merkle,
 };
 
-pub const MAX_BLOCK_TRANSACTIONS: usize = 1024;
-pub const MAX_BLOCK_SIZE: usize = 1024 * 1024;
+pub use crate::limits::{MAX_BLOCK_SIZE, MAX_BLOCK_TRANSACTIONS};
 
 pub type BlockNumber = u64;
 
