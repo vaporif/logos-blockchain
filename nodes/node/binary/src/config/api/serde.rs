@@ -49,7 +49,7 @@ impl Default for AxumBackendSettings {
             listen_address: SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, 8080).into(),
             cors_origins: Vec::default(),
             timeout: Duration::from_secs(30),
-            max_body_size: lb_http_api_common::default_max_body_size() as u64,
+            max_body_size: lb_http_api_common::settings::default_max_body_size() as u64,
             max_concurrent_requests: 500,
         }
     }
