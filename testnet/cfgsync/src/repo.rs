@@ -5,18 +5,17 @@ use std::{
     time::Duration,
 };
 
+use lb_config::GeneralConfig;
 use lb_node::config::{
     TracingConfig,
     deployment::{DeploymentSettings, WellKnownDeployment},
 };
-use lb_tests::topology::configs::GeneralConfig;
-use time::OffsetDateTime;
 use tokio::{sync::oneshot::Sender, time::timeout};
 
 use crate::{
     Entropy, FaucetSettings, Host,
     config::{create_node_config_from_template, create_node_configs},
-    load_entropy,
+    load_entropy, random_entropy,
     server::CfgSyncConfig,
 };
 
@@ -34,20 +33,22 @@ pub struct ConfigRepo {
     entropy: Entropy,
     faucet_settings: FaucetSettings,
     tracing_settings: TracingConfig,
-    chain_start_time: OffsetDateTime,
     timeout_duration: Duration,
 }
 
 impl From<CfgSyncConfig> for Arc<ConfigRepo> {
     fn from(config: CfgSyncConfig) -> Self {
-        let entropy = load_entropy(&config.entropy_file).expect("Failed to load entropy file");
+        let entropy = config
+            .entropy_file
+            .as_ref()
+            .map_or_else(random_entropy, |path| {
+                load_entropy(path).expect("Failed to load entropy file")
+            });
+
         ConfigRepo::new(
             config.n_hosts,
             entropy,
             config.faucet_settings(),
-            config
-                .chain_start_time
-                .unwrap_or_else(OffsetDateTime::now_utc),
             config.tracing_settings(),
             Duration::from_secs(config.timeout),
             config.deployment_settings_storage_path,
@@ -61,7 +62,6 @@ impl ConfigRepo {
         n_hosts: usize,
         entropy: Entropy,
         faucet_settings: FaucetSettings,
-        chain_start_time: OffsetDateTime,
         tracing_settings: TracingConfig,
         timeout_duration: Duration,
         deployment_settings_storage_path: PathBuf,
@@ -74,7 +74,6 @@ impl ConfigRepo {
             n_hosts,
             entropy,
             faucet_settings,
-            chain_start_time,
             tracing_settings,
             timeout_duration,
         });
@@ -139,7 +138,7 @@ impl ConfigRepo {
             let mut waiting_hosts = self.waiting_hosts.lock().unwrap();
             let hosts = waiting_hosts.keys().cloned().collect();
 
-            let (configs, genesis_tx, faucet_pk) = create_node_configs(
+            let (configs, genesis_block, faucet_pk) = create_node_configs(
                 &self.entropy,
                 &self.faucet_settings,
                 &self.tracing_settings,
@@ -147,9 +146,8 @@ impl ConfigRepo {
             );
             let devnet_settings = {
                 let mut default_settings = DeploymentSettings::from(WellKnownDeployment::Devnet);
-                default_settings.cryptarchia.genesis_state = genesis_tx;
+                default_settings.cryptarchia.genesis_block = genesis_block;
                 default_settings.cryptarchia.faucet_pk = faucet_pk;
-                default_settings.time.chain_start_time = self.chain_start_time;
                 default_settings
             };
 

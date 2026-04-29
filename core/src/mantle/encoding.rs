@@ -9,6 +9,7 @@ use nom::{
     number::complete::{le_u16, le_u32, le_u64, u8 as decode_u8},
     sequence::pair,
 };
+use time::OffsetDateTime;
 
 use crate::{
     mantle::{
@@ -154,7 +155,7 @@ fn decode_channel_set_keys(input: &[u8]) -> IResult<&[u8], SetKeysOp> {
 fn decode_channel_deposit(input: &[u8]) -> IResult<&[u8], DepositOp> {
     // ChannelDeposit = ChannelId Amount Metadata
     let (input, channel_id) = map(decode_hash32, ChannelId::from).parse(input)?;
-    let (input, amount) = decode_uint64(input)?;
+    let (input, inputs) = decode_inputs(input)?;
     let (input, metadata_len) = decode_uint32(input)?;
     let (input, metadata) =
         map(take(metadata_len as usize), |bytes: &[u8]| bytes.to_vec()).parse(input)?;
@@ -163,7 +164,7 @@ fn decode_channel_deposit(input: &[u8]) -> IResult<&[u8], DepositOp> {
         input,
         DepositOp {
             channel_id,
-            amount,
+            inputs,
             metadata,
         },
     ))
@@ -172,8 +173,16 @@ fn decode_channel_deposit(input: &[u8]) -> IResult<&[u8], DepositOp> {
 fn decode_channel_withdraw(input: &[u8]) -> IResult<&[u8], ChannelWithdrawOp> {
     // ChannelWithdraw = ChannelId Amount
     let (input, channel_id) = map(decode_hash32, ChannelId::from).parse(input)?;
-    let (input, amount) = decode_uint64(input)?;
-    Ok((input, ChannelWithdrawOp { channel_id, amount }))
+    let (input, outputs) = decode_outputs(input)?;
+    let (input, withdraw_nonce) = decode_uint32(input)?;
+    Ok((
+        input,
+        ChannelWithdrawOp {
+            channel_id,
+            outputs,
+            withdraw_nonce,
+        },
+    ))
 }
 
 // ==============================================================================
@@ -278,12 +287,14 @@ fn decode_leader_claim(input: &[u8]) -> IResult<&[u8], LeaderClaimOp> {
     // LeaderClaim = RewardsRoot VoucherNullifier
     let (input, rewards_root_fr) = decode_field_element(input)?;
     let (input, voucher_nullifier_fr) = decode_field_element(input)?;
+    let (input, pk) = decode_zk_public_key(input)?;
 
     Ok((
         input,
         LeaderClaimOp {
             rewards_root: RewardsRoot::from(rewards_root_fr),
             voucher_nullifier: VoucherNullifier::from(voucher_nullifier_fr),
+            pk,
         },
     ))
 }
@@ -300,18 +311,21 @@ fn decode_note(input: &[u8]) -> IResult<&[u8], Note> {
     Ok((input, Note::new(value, pk)))
 }
 
-fn decode_inputs(input: &[u8]) -> IResult<&[u8], Vec<NoteId>> {
+fn decode_inputs(input: &[u8]) -> IResult<&[u8], Inputs> {
     // Inputs = InputCount *NoteId
     let (input, input_count) = decode_byte(input)?;
 
-    count(map(decode_field_element, NoteId), input_count as usize).parse(input)
+    let (input, note_ids) =
+        count(map(decode_field_element, NoteId), input_count as usize).parse(input)?;
+    Ok((input, Inputs::new(note_ids)))
 }
 
-fn decode_outputs(input: &[u8]) -> IResult<&[u8], Vec<Note>> {
+fn decode_outputs(input: &[u8]) -> IResult<&[u8], Outputs> {
     // Outputs = OutputCount *Note
     let (input, output_count) = decode_byte(input)?;
+    let (input, notes) = count(decode_note, output_count as usize).parse(input)?;
 
-    count(decode_note, output_count as usize).parse(input)
+    Ok((input, Outputs::new(notes)))
 }
 
 fn decode_transfer(input: &[u8]) -> IResult<&[u8], TransferOp> {
@@ -360,7 +374,7 @@ fn decode_op_proof<'a>(input: &'a [u8], op: &Op) -> IResult<&'a [u8], OpProof> {
         }
 
         // ZkSigProof = ZkSignature
-        Op::SDPWithdraw(_) | Op::SDPActive(_) | Op::Transfer(_) => {
+        Op::SDPWithdraw(_) | Op::SDPActive(_) | Op::Transfer(_) | Op::ChannelDeposit(_) => {
             map(decode_zk_signature, OpProof::ZkSig).parse(input)
         }
 
@@ -377,9 +391,6 @@ fn decode_op_proof<'a>(input: &'a [u8], op: &Op) -> IResult<&'a [u8], OpProof> {
         Op::ChannelWithdraw(_) => {
             map(decode_channel_withdraw_proof, OpProof::ChannelWithdrawProof).parse(input)
         }
-
-        // None. It's indirectly signed through the Ledger Transaction signature.
-        Op::ChannelDeposit(_) => Ok((input, OpProof::NoProof)),
     }
 }
 
@@ -454,7 +465,7 @@ fn decode_channel_withdraw_proof(input: &[u8]) -> IResult<&[u8], ChannelWithdraw
         .map_err(|_| nom::Err::Failure(Error::new(input, ErrorKind::Verify)))
 }
 
-fn decode_field_element(input: &[u8]) -> IResult<&[u8], Fr> {
+pub(crate) fn decode_field_element(input: &[u8]) -> IResult<&[u8], Fr> {
     // FieldElement = 32BYTE
     map_res(take(32usize), |bytes: &[u8]| {
         fr_from_bytes(bytes).map_err(|_| "Invalid field element")
@@ -479,6 +490,15 @@ fn decode_array<const N: usize>(input: &[u8]) -> IResult<&[u8], [u8; N]> {
     .parse(input)
 }
 
+pub(crate) fn decode_utf8_string(input: &[u8], len: usize) -> IResult<&[u8], String> {
+    map_res(take(len), |bytes: &[u8]| {
+        std::str::from_utf8(bytes)
+            .map(ToOwned::to_owned)
+            .map_err(|_| Error::new(bytes, ErrorKind::Fail))
+    })
+    .parse(input)
+}
+
 fn decode_uint16(input: &[u8]) -> IResult<&[u8], u16> {
     // UINT16 = 2BYTE
     le_u16(input)
@@ -489,7 +509,7 @@ fn decode_uint32(input: &[u8]) -> IResult<&[u8], u32> {
     le_u32(input)
 }
 
-fn decode_uint64(input: &[u8]) -> IResult<&[u8], u64> {
+pub(crate) fn decode_uint64(input: &[u8]) -> IResult<&[u8], u64> {
     // UINT64 = 8BYTE
     le_u64(input)
 }
@@ -497,6 +517,18 @@ fn decode_uint64(input: &[u8]) -> IResult<&[u8], u64> {
 fn decode_byte(input: &[u8]) -> IResult<&[u8], u8> {
     // Byte = OCTET
     decode_u8(input)
+}
+
+pub(crate) fn decode_unix_timestamp(input: &[u8]) -> IResult<&[u8], OffsetDateTime> {
+    // Timestamp = UINT64
+    map_res(decode_uint64, |ts| {
+        OffsetDateTime::from_unix_timestamp(
+            ts.try_into()
+                .map_err(|_| Error::new(input, ErrorKind::Fail))?,
+        )
+        .map_err(|_| Error::new(input, ErrorKind::Fail))
+    })
+    .parse(input)
 }
 
 // ==============================================================================
@@ -509,6 +541,7 @@ use super::ops::opcode;
 use crate::{
     block::MAX_BLOCK_SIZE,
     mantle::{
+        ledger::{Inputs, Outputs},
         ops::channel::{ChannelKeyIndex, withdraw::ChannelWithdrawOp},
         tx::MantleTxGasContext,
     },
@@ -516,6 +549,7 @@ use crate::{
 };
 // Encode primitives
 
+/// Encode primitives
 fn encode_uint16(value: u16) -> Vec<u8> {
     value.to_le_bytes().to_vec()
 }
@@ -524,7 +558,7 @@ fn encode_uint32(value: u32) -> Vec<u8> {
     value.to_le_bytes().to_vec()
 }
 
-fn encode_uint64(value: u64) -> Vec<u8> {
+pub(crate) fn encode_uint64(value: u64) -> Vec<u8> {
     value.to_le_bytes().to_vec()
 }
 
@@ -532,11 +566,23 @@ fn encode_byte(value: u8) -> Vec<u8> {
     vec![value]
 }
 
+pub(crate) fn encode_string(s: &String) -> Vec<u8> {
+    s.as_bytes().to_vec()
+}
+
+pub(crate) fn encode_unix_timestamp(ts: &OffsetDateTime) -> Vec<u8> {
+    encode_uint64(
+        ts.unix_timestamp()
+            .try_into()
+            .expect("timestamp fits in u64"),
+    )
+}
+
 fn encode_hash32(hash: &[u8; 32]) -> Vec<u8> {
     hash.to_vec()
 }
 
-fn encode_field_element(fr: &Fr) -> Vec<u8> {
+pub(crate) fn encode_field_element(fr: &Fr) -> Vec<u8> {
     fr_to_bytes(fr).to_vec()
 }
 
@@ -611,16 +657,18 @@ fn encode_channel_set_keys(op: &SetKeysOp) -> Vec<u8> {
 fn encode_channel_deposit(op: &DepositOp) -> Vec<u8> {
     let mut bytes = Vec::new();
     bytes.extend(encode_hash32(op.channel_id.as_ref()));
-    bytes.extend(encode_uint64(op.amount));
+    bytes.extend(encode_inputs(op.inputs.as_ref()));
     bytes.extend(encode_uint32(op.metadata.len() as u32));
     bytes.extend(op.metadata.as_slice());
     bytes
 }
 
-fn encode_channel_withdraw(op: &ChannelWithdrawOp) -> Vec<u8> {
+#[must_use]
+pub fn encode_channel_withdraw(op: &ChannelWithdrawOp) -> Vec<u8> {
     let mut bytes = Vec::new();
     bytes.extend(encode_hash32(op.channel_id.as_ref()));
-    bytes.extend(encode_uint64(op.amount));
+    bytes.extend(encode_outputs(op.outputs.as_ref()));
+    bytes.extend(encode_uint32(op.withdraw_nonce));
     bytes
 }
 
@@ -695,10 +743,12 @@ pub fn encode_sdp_active(op: &SDPActiveOp) -> Vec<u8> {
 }
 
 /// Encode leader operations
-fn encode_leader_claim(op: &LeaderClaimOp) -> Vec<u8> {
+#[must_use]
+pub fn encode_leader_claim(op: &LeaderClaimOp) -> Vec<u8> {
     let mut bytes = Vec::new();
     bytes.extend(encode_field_element(&op.rewards_root.into()));
     bytes.extend(encode_field_element(&op.voucher_nullifier.into()));
+    bytes.extend(encode_field_element(op.pk.as_fr()));
     bytes
 }
 
@@ -743,8 +793,8 @@ fn encode_outputs(outputs: &[Note]) -> Vec<u8> {
 #[must_use]
 pub fn encode_transfer_op(op: &TransferOp) -> Vec<u8> {
     let mut bytes = Vec::new();
-    bytes.extend(encode_inputs(&op.inputs));
-    bytes.extend(encode_outputs(&op.outputs));
+    bytes.extend(encode_inputs(op.inputs.as_ref()));
+    bytes.extend(encode_outputs(op.outputs.as_ref()));
     bytes
 }
 
@@ -814,7 +864,6 @@ fn encode_op_proof(proof: &OpProof, op: &Op) -> Vec<u8> {
         (OpProof::Ed25519Sig(sig), Op::ChannelInscribe(_) | Op::ChannelSetKeys(_)) => {
             encode_ed25519_signature(sig)
         }
-        (OpProof::NoProof, Op::ChannelDeposit(_)) => Vec::new(),
         (OpProof::ChannelWithdrawProof(proof), Op::ChannelWithdraw(_)) => {
             encode_channel_withdraw_proof(proof)
         }
@@ -829,9 +878,10 @@ fn encode_op_proof(proof: &OpProof, op: &Op) -> Vec<u8> {
             bytes.extend(encode_ed25519_signature(ed25519_sig));
             bytes
         }
-        (OpProof::ZkSig(sig), Op::SDPWithdraw(_) | Op::SDPActive(_) | Op::Transfer(_)) => {
-            encode_zk_signature(sig)
-        }
+        (
+            OpProof::ZkSig(sig),
+            Op::SDPWithdraw(_) | Op::SDPActive(_) | Op::Transfer(_) | Op::ChannelDeposit(_),
+        ) => encode_zk_signature(sig),
         (OpProof::PoC(poc), Op::LeaderClaim(_)) => encode_poc(poc),
         _ => {
             panic!("Mismatch between proof type and operation type");
@@ -909,10 +959,7 @@ mod tests {
     use num_bigint::BigUint;
 
     use super::*;
-    use crate::{
-        mantle::{Transaction as _, TxHash},
-        sdp::blend::ActivityProof,
-    };
+    use crate::{mantle::Transaction as _, sdp::blend::ActivityProof};
 
     fn dbg_test_vector(actual: &str, expected: &str) {
         println!("{:32} {:32}", "actual", "expected");
@@ -941,29 +988,43 @@ mod tests {
     }
 
     #[test]
-    fn test_decode_primitives() {
+    fn test_encode_decode_primitives() {
         // Test UINT64
-        let data = 42u64.to_le_bytes();
+        let data = encode_uint64(42u64);
         let (remaining, value) = decode_uint64(&data).unwrap();
         assert_eq!(value, 42u64);
         assert!(remaining.is_empty());
 
         // Test UINT32
-        let data = 123u32.to_le_bytes();
+        let data = encode_uint32(123u32);
         let (remaining, value) = decode_uint32(&data).unwrap();
         assert_eq!(value, 123u32);
         assert!(remaining.is_empty());
 
         // Test Byte
-        let data = [0xAB];
+        let data = encode_byte(0xAB);
         let (remaining, value) = decode_byte(&data).unwrap();
         assert_eq!(value, 0xAB);
         assert!(remaining.is_empty());
 
         // Test Hash32
-        let data = [0x42u8; 32];
+        let data = encode_hash32(&[0x42u8; 32]);
         let (remaining, value) = decode_hash32(&data).unwrap();
         assert_eq!(value, [0x42u8; 32]);
+        assert!(remaining.is_empty());
+
+        // Test UTF-8 String
+        let str = "hello, world!".to_owned();
+        let data = encode_string(&str);
+        let (remaining, value) = decode_utf8_string(&data, data.len()).unwrap();
+        assert_eq!(value, str);
+        assert!(remaining.is_empty());
+
+        // Test Unix Timestamp
+        let ts = OffsetDateTime::now_utc();
+        let data = encode_unix_timestamp(&ts);
+        let (remaining, value) = decode_unix_timestamp(&data).unwrap();
+        assert_eq!(value, ts.truncate_to_second());
         assert!(remaining.is_empty());
     }
 
@@ -1184,7 +1245,7 @@ mod tests {
         let pk = ZkPublicKey::from(BigUint::from(42u64));
         let note = Note::new(1000, pk);
         let note_id = NoteId(BigUint::from(123u64).into());
-        let transfer_op = TransferOp::new(vec![note_id], vec![note]);
+        let transfer_op = TransferOp::new(Inputs::new(vec![note_id]), Outputs::new(vec![note]));
 
         let original_tx = MantleTx {
             ops: vec![Op::Transfer(transfer_op)],
@@ -1321,7 +1382,7 @@ mod tests {
 
         let locked_note_sk = ZkKey::from(BigUint::from(1u64));
         let locked_note = crate::mantle::Utxo {
-            transfer_hash: TxHash::from(BigUint::from(42u64)),
+            op_id: [1u8; 32],
             output_index: 12,
             note: Note {
                 value: 500,
@@ -1519,7 +1580,10 @@ mod tests {
         let note_id2 = NoteId(BigUint::from(222u64).into());
         let note_id3 = NoteId(BigUint::from(333u64).into());
 
-        let transfer_op = TransferOp::new(vec![note_id1, note_id2, note_id3], vec![note1, note2]);
+        let transfer_op = TransferOp::new(
+            Inputs::new(vec![note_id1, note_id2, note_id3]),
+            Outputs::new(vec![note1, note2]),
+        );
 
         let mantle_tx = MantleTx {
             ops: vec![Op::Transfer(transfer_op)],
@@ -1564,8 +1628,8 @@ mod tests {
 
         let locked_note_sk = ZkKey::from(BigUint::from(1u64));
         let transfer_op = TransferOp {
-            inputs: vec![NoteId(BigUint::from(777u64).into())],
-            outputs: vec![Note::new(5000, locked_note_sk.to_public_key())],
+            inputs: Inputs::new(vec![NoteId(BigUint::from(777u64).into())]),
+            outputs: Outputs::new(vec![Note::new(5000, locked_note_sk.to_public_key())]),
         };
 
         let locator: multiaddr::Multiaddr = "/dns4/example.com/tcp/443".parse().unwrap();
@@ -1575,7 +1639,11 @@ mod tests {
             locators: vec![Locator::new(locator)],
             provider_id: ProviderId(signing_key1.public_key()),
             zk_id: zk_sk.to_public_key(),
-            locked_note_id: transfer_op.utxo_by_index(0).unwrap().id(),
+            locked_note_id: transfer_op
+                .outputs
+                .utxo_by_index(0, &transfer_op)
+                .unwrap()
+                .id(),
         };
 
         let mantle_tx = MantleTx {
@@ -1622,6 +1690,7 @@ mod tests {
         let leader_claim_op = LeaderClaimOp {
             rewards_root: RewardsRoot::default(),
             voucher_nullifier: VoucherNullifier::default(),
+            pk: ZkPublicKey::from(BigUint::from(0u64)),
         };
 
         let mantle_tx = MantleTx {
@@ -1662,6 +1731,7 @@ mod tests {
         let leader_claim_op = LeaderClaimOp {
             rewards_root: RewardsRoot::default(),
             voucher_nullifier: voucher_nf,
+            pk: ZkPublicKey::from(BigUint::from(0u64)),
         };
         let op = Op::LeaderClaim(leader_claim_op);
 
@@ -1680,12 +1750,34 @@ mod tests {
     }
 
     #[test]
+    fn test_encode_decode_leader_claim_op() {
+        let leader_claim_op = LeaderClaimOp {
+            rewards_root: RewardsRoot::default(),
+            voucher_nullifier: VoucherNullifier::default(),
+            pk: ZkPublicKey::from(BigUint::from(0u64)),
+        };
+        let op = Op::LeaderClaim(leader_claim_op);
+
+        let encoded = encode_op(&op);
+        let (remaining, decoded_op) = decode_op(&encoded).unwrap();
+        assert!(remaining.is_empty());
+        assert_eq!(decoded_op, op);
+    }
+
+    #[test]
     fn test_encode_decode_channel_withdraw_tx() {
+        let pk1 = ZkPublicKey::from(BigUint::from(100u64));
+        let pk2 = ZkPublicKey::from(BigUint::from(200u64));
+
+        let note1 = Note::new(1000, pk1);
+        let note2 = Note::new(2000, pk2);
+
         let signing_key = Ed25519Key::from_bytes(&[21u8; 32]);
         let mantle_tx = MantleTx {
             ops: vec![Op::ChannelWithdraw(ChannelWithdrawOp {
                 channel_id: ChannelId::from([0xAB; 32]),
-                amount: 17,
+                outputs: Outputs::new(vec![note1, note2]),
+                withdraw_nonce: 0,
             })],
             execution_gas_price: 100.into(),
             storage_gas_price: 50.into(),

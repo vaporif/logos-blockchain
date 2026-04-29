@@ -4,6 +4,7 @@ use lb_common_http_client::CommonHttpClient;
 use lb_core::mantle::{
     MantleTx, Note, Op, OpProof, SignedMantleTx, Transaction as _, TxHash,
     genesis_tx::GENESIS_STORAGE_GAS_PRICE,
+    ledger::{Inputs, Outputs},
     ops::{channel::ChannelId, transfer::TransferOp},
 };
 use lb_key_management_system_service::keys::{ZkKey, ZkPublicKey};
@@ -22,7 +23,6 @@ use serial_test::serial;
 /// Verifies that invalid transactions don't prevent valid transactions from
 /// being included in blocks.
 #[tokio::test]
-#[serial]
 async fn invalid_transactions_are_handled() {
     let topology = Topology::spawn(
         TopologyConfig::two_validators(),

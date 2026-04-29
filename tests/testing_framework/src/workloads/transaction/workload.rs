@@ -12,6 +12,7 @@ use lb_core::mantle::{
     GasCalculator as _, GenesisTx as _, Note, OpProof, SignedMantleTx, Transaction as _, Utxo,
     gas::MainnetGasConstants,
     genesis_tx::GENESIS_STORAGE_GAS_PRICE,
+    ops::OpId as _,
     tx::{MantleTxContext, MantleTxGasContext},
     tx_builder::MantleTxBuilder,
 };
@@ -38,6 +39,7 @@ pub(super) struct SubmissionPlan {
 }
 
 const MAX_SUBMISSION_INTERVAL: Duration = Duration::from_secs(1);
+
 #[derive(Debug, Error)]
 enum TxWorkloadError {
     #[error("transaction workload requires seeded wallet accounts")]
@@ -102,12 +104,17 @@ where
             .nodes()
             .first()
             .ok_or(TxWorkloadError::MissingReferenceNode)?;
-        let genesis_tx = descriptors
+        let genesis_block = descriptors
             .config()
-            .genesis_tx
+            .genesis_block
             .as_ref()
             .ok_or(TxWorkloadError::MissingReferenceNode)?;
-        let utxo_map = wallet_utxo_map(genesis_tx);
+        let utxo_map = wallet_utxo_map(
+            genesis_block
+                .transactions()
+                .next()
+                .expect("Genesis block should contain a genesis tx"),
+        );
 
         let mut accounts = wallet_accounts
             .into_iter()
@@ -315,13 +322,13 @@ fn wallet_utxo_map(
     genesis_tx: &lb_core::mantle::genesis_tx::GenesisTx,
 ) -> HashMap<ZkPublicKey, Utxo> {
     let transfer_op = genesis_tx.genesis_transfer().clone();
-    let tx_hash = transfer_op.hash();
+    let op_id = transfer_op.op_id();
 
     transfer_op
         .outputs
         .iter()
         .enumerate()
-        .map(|(idx, note)| (note.pk, Utxo::new(tx_hash, idx, *note)))
+        .map(|(idx, note)| (note.pk, Utxo::new(op_id, idx, *note)))
         .collect()
 }
 

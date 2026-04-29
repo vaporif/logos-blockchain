@@ -1,5 +1,6 @@
 use std::{collections::HashMap, hash::BuildHasher, time::Duration};
 
+use lb_libp2p::{Multiaddr, PeerId, Protocol};
 use lb_testing_framework::{
     DeploymentBuilder, LbcEnv, LbcLocalDeployer, NodeHttpClient, TopologyConfig,
     configs::wallet::WalletAccount, internal::DeploymentPlan,
@@ -85,9 +86,11 @@ pub fn build_manual_cluster_deployment(
                 message: format!("failed to build manual cluster: {e}"),
             })?;
 
-    if let Some(genesis_tx) = deployment.config.genesis_tx.clone() {
+    if let Some(genesis_block) = deployment.config.genesis_block.clone() {
         world.genesis_block_utxos =
-            crate::cucumber::steps::manual_nodes::utils::genesis_block_utxos(&genesis_tx);
+            crate::cucumber::steps::manual_nodes::utils::genesis_block_utxos(
+                &genesis_block.genesis_tx(),
+            );
     }
 
     Ok(deployment)
@@ -286,6 +289,46 @@ pub async fn assert_manual_node_has_peers(
     }
 }
 
+pub async fn connect_manual_node_to_node(
+    world: &CucumberWorld,
+    source_node_name: &str,
+    target_node_name: &str,
+) -> StepResult {
+    let source_client = world.resolve_node_http_client(source_node_name)?;
+    let target_client = world.resolve_node_http_client(target_node_name)?;
+    let target_network = target_client.network_info().await?;
+    let target_addr = compose_dial_addr(
+        target_network.listen_addresses.first(),
+        target_network.peer_id,
+    )
+    .ok_or_else(|| StepError::LogicalError {
+        message: format!("node '{target_node_name}' has no listen address to dial"),
+    })?;
+
+    source_client
+        .dial_peer(target_addr)
+        .await
+        .map(|_| ())
+        .map_err(|error| StepError::LogicalError {
+            message: format!(
+                "failed to connect node '{source_node_name}' to node '{target_node_name}': {error}"
+            ),
+        })
+}
+
+fn compose_dial_addr(listen_addr: Option<&Multiaddr>, peer_id: PeerId) -> Option<Multiaddr> {
+    let mut addr = listen_addr?.clone();
+    let has_peer_id = addr
+        .iter()
+        .any(|protocol| matches!(protocol, Protocol::P2p(_)));
+
+    if !has_peer_id {
+        addr.push(Protocol::P2p(peer_id));
+    }
+
+    Some(addr)
+}
+
 pub fn build_user_wallets(
     world: &CucumberWorld,
     node_name: &str,
@@ -320,7 +363,7 @@ pub fn build_user_wallets(
 
 pub fn insert_started_node_info<S: BuildHasher>(
     world: &mut CucumberWorld,
-    logical_node_name: String,
+    logical_node_name: &str,
     started_node: StartedNode<LbcEnv>,
     wallet_info: HashMap<String, WalletInfo, S>,
 ) {
@@ -331,14 +374,15 @@ pub fn insert_started_node_info<S: BuildHasher>(
         .extend(wallet_info.iter().map(|(k, v)| (k.clone(), v.clone())));
 
     world.nodes_info.insert(
-        logical_node_name.clone(),
+        logical_node_name.to_owned(),
         NodeInfo {
-            name: logical_node_name,
+            name: logical_node_name.to_owned(),
             started_node,
             run_config: None,
             chain_info: HashMap::new(),
             wallet_info,
             runtime_dir: std::path::PathBuf::new(),
+            immediate_start: world.network_immediate_start(logical_node_name),
         },
     );
 }

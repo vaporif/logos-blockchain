@@ -18,6 +18,8 @@ pub use block_feed::{
     block_feed_source_provider, block_feed_sources, named_block_feed_sources,
 };
 use common_http_client::BasicAuthCredentials;
+use lb_config::kms::key_id_for_preload_backend;
+use lb_core::block::genesis::GenesisBlock;
 use lb_node::config::RunConfig;
 use reqwest::Url;
 use testing_framework_core::{
@@ -30,11 +32,12 @@ use testing_framework_core::{
 use testing_framework_runner_local::{ManualCluster, ProcessDeployer};
 
 use crate::{
+    FailureDiagnosticsExpectation,
     node::{
         DeploymentPlan, NodeHttpClient,
         configs::{
             deployment::{DeploymentBuilder, TopologyConfig},
-            key_id_for_preload_backend, postprocess,
+            postprocess,
             wallet::WalletConfig,
         },
     },
@@ -165,19 +168,19 @@ pub fn apply_wallet_config_to_deployment(deployment: &mut DeploymentPlan, wallet
         .map(|plan| plan.general.clone())
         .collect::<Vec<_>>();
 
-    let Some(base_genesis_tx) = deployment.config.genesis_tx.clone() else {
+    let Some(genesis_block): Option<GenesisBlock> = deployment.config.genesis_block.clone() else {
         return;
     };
 
-    let genesis_tx = postprocess::apply_wallet_genesis_overrides(
+    let genesis_block = postprocess::apply_wallet_genesis_overrides(
         &mut node_configs,
-        &base_genesis_tx,
+        &genesis_block,
         deployment.config.blend_core_nodes,
         &wallet_accounts,
         key_id_for_preload_backend,
         deployment.config.test_context.as_deref(),
     );
-    deployment.config.genesis_tx = Some(genesis_tx);
+    deployment.config.genesis_block = Some(genesis_block);
 
     for (plan, node_config) in deployment.plans.iter_mut().zip(node_configs) {
         plan.general = node_config;
@@ -250,11 +253,15 @@ impl ScenarioBuilderExt for ScenarioBuilderWith {
     }
 
     fn expect_consensus_liveness(self) -> Self {
-        self.with_expectation(ConsensusLiveness::default())
+        self.with_expectation(FailureDiagnosticsExpectation::new(
+            ConsensusLiveness::default(),
+        ))
     }
 
     fn expect_cluster_fork_monitor(self) -> Self {
-        self.with_expectation(ClusterForkMonitor::<LbcEnv>::default())
+        self.with_expectation(FailureDiagnosticsExpectation::new(ClusterForkMonitor::<
+            LbcEnv,
+        >::default()))
     }
 
     fn initialize_wallet(self, total_funds: u64, users: usize) -> Self {

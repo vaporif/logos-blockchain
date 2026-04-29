@@ -145,7 +145,11 @@ fn should_skip(message: &ZoneMessage, slot: Slot, skip_until: &mut Option<(MsgId
 mod tests {
     use async_trait::async_trait;
     use lb_common_http_client::{ApiBlock, BlockInfo, CryptarchiaInfo, ProcessedBlockEvent};
-    use lb_core::{header::HeaderId, mantle::SignedMantleTx};
+    use lb_core::{
+        header::HeaderId,
+        mantle::{NoteId, SignedMantleTx, ledger::Inputs},
+    };
+    use lb_groth16::Fr;
 
     use super::*;
     use crate::{Deposit, ZoneBlock};
@@ -163,7 +167,10 @@ mod tests {
     async fn next_messages_no_skip() {
         let messages = vec![
             (block_msg(1, &[1]), Slot::new(0)),
-            (deposit_msg(10, &[10]), Slot::new(0)),
+            (
+                deposit_msg(Inputs::new(vec![NoteId::from(Fr::from(10u32))]), &[10]),
+                Slot::new(0),
+            ),
             (block_msg(2, &[2]), Slot::new(1)),
         ];
         let indexer = indexer(Slot::new(1), messages.clone());
@@ -180,7 +187,10 @@ mod tests {
     async fn next_messages_until_lib() {
         let messages = vec![
             (block_msg(1, &[1]), Slot::new(0)),
-            (deposit_msg(10, &[10]), Slot::new(1)),
+            (
+                deposit_msg(Inputs::new(vec![NoteId::from(Fr::from(10u32))]), &[10]),
+                Slot::new(1),
+            ),
             (block_msg(2, &[2]), Slot::new(2)), // after LIB
         ];
         let indexer = indexer(Slot::new(1), messages.clone());
@@ -196,9 +206,15 @@ mod tests {
     async fn next_messages_skip() {
         let messages = vec![
             (block_msg(1, &[1]), Slot::new(0)),
-            (deposit_msg(10, &[10]), Slot::new(0)),
+            (
+                deposit_msg(Inputs::new(vec![NoteId::from(Fr::from(10u32))]), &[10]),
+                Slot::new(0),
+            ),
             (block_msg(2, &[2]), Slot::new(1)),
-            (deposit_msg(11, &[11]), Slot::new(2)),
+            (
+                deposit_msg(Inputs::new(vec![NoteId::from(Fr::from(11u32))]), &[11]),
+                Slot::new(2),
+            ),
             (block_msg(3, &[3]), Slot::new(2)),
         ];
         let indexer = indexer(Slot::new(2), messages.clone());
@@ -218,9 +234,15 @@ mod tests {
     async fn next_messages_skip_msg_not_found() {
         let messages = vec![
             (block_msg(1, &[1]), Slot::new(0)),
-            (deposit_msg(10, &[10]), Slot::new(0)),
+            (
+                deposit_msg(Inputs::new(vec![NoteId::from(Fr::from(10u32))]), &[10]),
+                Slot::new(0),
+            ),
             (block_msg(2, &[2]), Slot::new(1)),
-            (deposit_msg(11, &[11]), Slot::new(2)),
+            (
+                deposit_msg(Inputs::new(vec![NoteId::from(Fr::from(11u32))]), &[11]),
+                Slot::new(2),
+            ),
             (block_msg(4, &[4]), Slot::new(2)),
         ];
         let indexer = indexer(Slot::new(2), messages.clone());
@@ -241,7 +263,10 @@ mod tests {
     async fn next_messages_skip_but_nothing_left() {
         let messages = vec![
             (block_msg(1, &[1]), Slot::new(0)),
-            (deposit_msg(10, &[10]), Slot::new(0)),
+            (
+                deposit_msg(Inputs::new(vec![NoteId::from(Fr::from(10u32))]), &[10]),
+                Slot::new(0),
+            ),
             (block_msg(2, &[2]), Slot::new(1)),
         ];
         let indexer = indexer(Slot::new(2), messages.clone());
@@ -260,7 +285,10 @@ mod tests {
     async fn next_messages_across_batches() {
         let messages = vec![
             (block_msg(1, &[1]), Slot::new(0)),
-            (deposit_msg(10, &[10]), BATCH_SIZE),
+            (
+                deposit_msg(Inputs::new(vec![NoteId::from(Fr::from(10u32))]), &[10]),
+                BATCH_SIZE,
+            ),
             (
                 block_msg(2, &[2]),
                 BATCH_SIZE.into_inner().checked_mul(2).unwrap().into(),
@@ -270,7 +298,7 @@ mod tests {
                 BATCH_SIZE.into_inner().checked_mul(2).unwrap().into(),
             ),
             (
-                deposit_msg(11, &[11]),
+                deposit_msg(Inputs::new(vec![NoteId::from(Fr::from(11u32))]), &[11]),
                 BATCH_SIZE.into_inner().checked_mul(3).unwrap().into(),
             ),
             (
@@ -315,9 +343,9 @@ mod tests {
         })
     }
 
-    fn deposit_msg(amount: u64, metadata: &[u8]) -> ZoneMessage {
+    fn deposit_msg(inputs: Inputs, metadata: &[u8]) -> ZoneMessage {
         ZoneMessage::Deposit(Deposit {
-            amount,
+            inputs,
             metadata: metadata.to_vec(),
         })
     }
@@ -349,17 +377,14 @@ mod tests {
 
         async fn block_stream(
             &self,
-        ) -> Result<
-            impl Stream<Item = ProcessedBlockEvent> + Send + 'static,
-            lb_common_http_client::Error,
-        > {
-            Ok(futures::stream::empty())
+        ) -> Result<adapter::BoxStream<ProcessedBlockEvent>, lb_common_http_client::Error> {
+            Ok(Box::pin(futures::stream::empty()))
         }
 
         async fn lib_stream(
             &self,
-        ) -> Result<impl Stream<Item = BlockInfo> + Send, lb_common_http_client::Error> {
-            Ok(futures::stream::empty())
+        ) -> Result<adapter::BoxStream<BlockInfo>, lb_common_http_client::Error> {
+            Ok(Box::pin(futures::stream::empty()))
         }
 
         async fn block(
@@ -381,8 +406,8 @@ mod tests {
             &self,
             _id: HeaderId,
             _channel_id: ChannelId,
-        ) -> Result<impl Stream<Item = ZoneMessage>, lb_common_http_client::Error> {
-            Ok(futures::stream::empty())
+        ) -> Result<adapter::BoxStream<ZoneMessage>, lb_common_http_client::Error> {
+            Ok(Box::pin(futures::stream::empty()))
         }
 
         async fn zone_messages_in_blocks(
@@ -390,13 +415,14 @@ mod tests {
             slot_from: Slot,
             slot_to: Slot,
             _channel_id: ChannelId,
-        ) -> Result<impl Stream<Item = (ZoneMessage, Slot)>, lb_common_http_client::Error> {
-            Ok(futures::stream::iter(
-                self.messages
-                    .iter()
-                    .filter(move |(_, slot)| *slot >= slot_from && *slot <= slot_to)
-                    .cloned(),
-            ))
+        ) -> Result<adapter::BoxStream<(ZoneMessage, Slot)>, lb_common_http_client::Error> {
+            let msgs: Vec<_> = self
+                .messages
+                .iter()
+                .filter(move |(_, slot)| *slot >= slot_from && *slot <= slot_to)
+                .cloned()
+                .collect();
+            Ok(Box::pin(futures::stream::iter(msgs)))
         }
 
         async fn post_transaction(

@@ -9,7 +9,8 @@ use lb_libp2p::Multiaddr;
 use lb_node::{UserConfig, config::RunConfig};
 use lb_testing_framework::{
     DeploymentBuilder, LbcEnv, LbcLocalDeployer, LbcManualCluster, NodeHttpClient,
-    USER_CONFIG_FILE, internal::DeploymentPlan,
+    USER_CONFIG_FILE, internal::DeploymentPlan, record_system_monitor_event,
+    register_system_monitor_output_file,
 };
 use reqwest::Url;
 use testing_framework_core::scenario::{DynError, PeerSelection, StartNodeOptions, StartedNode};
@@ -37,6 +38,12 @@ pub fn build_local_manual_cluster(
     ensure_local_node_binary_env();
 
     let scenario_base_dir = unique_scenario_base_dir(&format!("{prefix}-{test_name}"));
+    register_system_monitor_output_file(&scenario_base_dir.join("system_stats.ndjson"));
+    record_system_monitor_event(
+        "manual_cluster_prepared",
+        scenario_base_dir.display().to_string(),
+    );
+
     let deployment = builder
         .scenario_base_dir(scenario_base_dir.clone())
         .build()
@@ -82,6 +89,11 @@ where
 }
 
 pub fn ensure_local_node_binary_env() {
+    // Respect an existing binary override (for example, a testing-featured build).
+    if std::env::var_os("LOGOS_BLOCKCHAIN_NODE_BIN").is_some() {
+        return;
+    }
+
     // SAFETY: Tests set this process-local env var before spawning node processes.
     // We do not read-modify-write shared data through references here.
     unsafe {
@@ -161,12 +173,9 @@ pub async fn wait_for_height(
 ) -> Result<(), Elapsed> {
     tokio::time::timeout(duration, async {
         loop {
-            let info = client
-                .consensus_info()
-                .await
-                .expect("fetching consensus info should succeed");
-
-            if info.height >= target_height {
+            if let Ok(info) = client.consensus_info().await
+                && info.height >= target_height
+            {
                 return;
             }
 

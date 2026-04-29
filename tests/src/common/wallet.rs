@@ -1,6 +1,7 @@
 use lb_common_http_client::ApiBlock;
 use lb_core::mantle::{Utxo, gas::MainnetGasConstants, tx_builder::MantleTxBuilder};
 use lb_key_management_system_service::keys::ZkPublicKey;
+use lb_mmr::MerkleMountainRange;
 use lb_testing_framework::NodeHttpClient;
 use lb_wallet::{WalletError, WalletState};
 use rpds::{HashTrieMapSync, HashTrieSetSync};
@@ -71,7 +72,7 @@ pub async fn current_utxos_for_public_key(
                     owned.remove(input);
                 }
 
-                for utxo in transfer.utxos() {
+                for utxo in transfer.outputs.utxos(&transfer) {
                     if utxo.note.pk == public_key {
                         owned.insert(utxo.id(), utxo);
                     }
@@ -103,5 +104,10 @@ fn wallet_state_from_utxos(utxos: Vec<Utxo>) -> WalletState {
     WalletState {
         utxos: utxo_map,
         pk_index,
+        locked_notes: HashTrieSetSync::new_sync(),
+        epoch: 0.into(),
+        vouchers: MerkleMountainRange::new(),
+        voucher_paths: HashTrieMapSync::new_sync(),
+        voucher_paths_snapshot: HashTrieMapSync::new_sync(),
     }
 }

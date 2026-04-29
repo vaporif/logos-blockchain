@@ -278,7 +278,7 @@ where
     E: LbcBlockFeedEnv,
 {
     let config: &TopologyConfig = ctx.descriptors().config();
-    let Some(genesis_tx) = config.genesis_tx.clone() else {
+    let Some(genesis_tx) = config.genesis_block.clone() else {
         return (
             DEFAULT_TIP_STALL_THRESHOLD,
             DEFAULT_NODE_TIP_STALL_THRESHOLD,
@@ -286,7 +286,7 @@ where
         );
     };
 
-    let deployment = default_e2e_deployment_settings(genesis_tx);
+    let deployment = default_e2e_deployment_settings(&genesis_tx);
     let node_count = ctx.node_clients().len() as u64;
 
     (
@@ -314,22 +314,23 @@ fn propagation_budget(
         .slot_duration
         .div_f64(deployment.cryptarchia.slot_activation_coeff.as_f64());
 
-    let blend_latency = if blend_network_size < deployment.blend.common.minimum_network_size.get() {
-        Duration::ZERO
-    } else {
-        deployment.blend_round_duration().saturating_mul(
-            (deployment
-                .blend
-                .core
-                .scheduler
-                .delayer
-                .maximum_release_delay_in_rounds
-                .get()
-                * deployment.blend.common.num_blend_layers.get())
-            .try_into()
-            .expect("blend latency multiplier must fit u32"),
-        )
-    };
+    let blend_latency =
+        if blend_network_size < deployment.blend.common.minimum_network_size.into_inner() {
+            Duration::ZERO
+        } else {
+            deployment.blend_round_duration().saturating_mul(
+                (deployment
+                    .blend
+                    .core
+                    .scheduler
+                    .delayer
+                    .maximum_release_delay_in_rounds
+                    .get()
+                    * deployment.blend.common.num_blend_layers.get())
+                .try_into()
+                .expect("blend latency multiplier must fit u32"),
+            )
+        };
 
     proposal_interval
         .saturating_add(blend_latency)
