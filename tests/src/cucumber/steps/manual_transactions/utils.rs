@@ -15,7 +15,7 @@ use lb_core::{
         TxHash, Utxo,
         gas::MainnetGasConstants,
         ops::Op,
-        tx::{MantleTxContext, MantleTxGasContext},
+        tx::{GasPrices, MantleTxContext, MantleTxGasContext},
         tx_builder::MantleTxBuilder,
     },
 };
@@ -237,7 +237,8 @@ pub(crate) async fn prepare_user_wallet_built_transaction_submission(
 
     let mantle_tx = funded_builder.clone().build();
     let tx_hash = mantle_tx.hash();
-    let transfer_proofs = build_transfer_proofs(step, &mantle_tx.ops, &tx_hash, &transfer_signers)?;
+    let transfer_proofs =
+        build_transfer_proofs(step, mantle_tx.ops(), &tx_hash, &transfer_signers)?;
 
     Ok(PreparedUserWalletSubmission {
         wallet,
@@ -302,6 +303,7 @@ pub(crate) async fn submit_prepared_user_wallet_transaction(
         newly_encumbered_fee,
     } = prepared;
     let sender_wallet_name = wallet.wallet_name.as_str();
+    let gas_prices = funded_builder.get_gas_prices();
 
     let mantle_tx = funded_builder.build();
     extra_op_proofs.extend(transfer_proofs);
@@ -337,7 +339,7 @@ pub(crate) async fn submit_prepared_user_wallet_transaction(
     world.record_tracked_spent_fee(
         sender_wallet_name,
         signed_tx
-            .total_gas_cost::<MainnetGasConstants>()
+            .total_gas_cost::<MainnetGasConstants>(gas_prices)
             .map_err(|e| StepError::LogicalError {
                 message: format!("Step `{step}` error: failed to compute gas cost: {e}"),
             })
@@ -422,7 +424,7 @@ fn funding_inputs_from_transfers(
     step: &str,
 ) -> Result<Vec<Utxo>, StepError> {
     mantle_tx
-        .ops
+        .ops()
         .iter()
         .filter_map(|op| match op {
             Op::Transfer(transfer_op) => Some(transfer_op),
@@ -796,11 +798,13 @@ fn log_wallet_balance(
 
 fn base_user_wallet_transaction(receivers: &[(ZkPublicKey, u64)]) -> MantleTxBuilder {
     let empty_context = MantleTxContext {
-        gas_context: MantleTxGasContext::new(HashMap::new()),
+        gas_context: MantleTxGasContext::new(
+            HashMap::new(),
+            GasPrices::new(0, DEFAULT_STORAGE_GAS_PRICE),
+        ),
         ..MantleTxContext::default()
     };
-    let mut tx_builder =
-        MantleTxBuilder::new(empty_context).set_storage_gas_price(DEFAULT_STORAGE_GAS_PRICE.into());
+    let mut tx_builder = MantleTxBuilder::new(empty_context);
 
     for (receiver_pk, value) in receivers {
         tx_builder = tx_builder.add_ledger_output(Note::new(*value, *receiver_pk));

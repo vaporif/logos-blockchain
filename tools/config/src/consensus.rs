@@ -5,7 +5,7 @@ use lb_core::{
     block::genesis::{GenesisBlock, GenesisBlockBuilder},
     mantle::{
         CryptarchiaParameter, MantleTx, Note, NoteId, OpProof, Utxo,
-        genesis_tx::{GENESIS_EXECUTION_GAS_PRICE, GENESIS_STORAGE_GAS_PRICE, GenesisTx},
+        genesis_tx::GenesisTx,
         ops::{
             Op, OpId as _,
             channel::{ChannelId, Ed25519PublicKey, MsgId, inscribe::InscriptionOp},
@@ -290,11 +290,7 @@ pub fn create_genesis_block_with_declarations(
         ops.push(Op::SDPDeclare(declaration));
     }
 
-    let mantle_tx = MantleTx {
-        ops,
-        execution_gas_price: GENESIS_EXECUTION_GAS_PRICE,
-        storage_gas_price: GENESIS_STORAGE_GAS_PRICE,
-    };
+    let mantle_tx = MantleTx(ops);
 
     let mantle_tx_hash = mantle_tx.hash();
     let mut ops_proofs = vec![

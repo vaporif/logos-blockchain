@@ -29,7 +29,7 @@ use lb_chain_broadcast_service::{
 use lb_core::{
     block::{Block, genesis::GenesisBlock},
     header::HeaderId,
-    mantle::{AuthenticatedMantleTx, Transaction, TxHash, gas::MainnetGasConstants},
+    mantle::{AuthenticatedMantleTx, Transaction, TxHash, gas::MainnetGasConstants, tx::GasPrices},
     sdp::{Declaration, DeclarationId, ProviderId, ProviderInfo, ServiceType},
 };
 use lb_cryptarchia_engine::{Branch, PrunedBlocks, ReorgedBlocks};
@@ -297,7 +297,7 @@ impl Cryptarchia {
         current_slot: Slot,
     ) -> Result<(PrunedBlocks<HeaderId>, ReorgedBlocks<HeaderId>), Error>
     where
-        Tx: AuthenticatedMantleTx,
+        Tx: AuthenticatedMantleTx<Context = GasPrices>,
     {
         let header = block.header();
         let id = header.id();
@@ -512,7 +512,7 @@ impl<Tx, Storage, TimeBackend, RuntimeServiceId> ServiceCore<RuntimeServiceId>
     for CryptarchiaConsensus<Tx, Storage, TimeBackend, RuntimeServiceId>
 where
     Tx: Transaction<Hash = TxHash>
-        + AuthenticatedMantleTx
+        + AuthenticatedMantleTx<Context = GasPrices>
         + Debug
         + Clone
         + Eq
@@ -720,7 +720,7 @@ impl<Tx, Storage, TimeBackend, RuntimeServiceId>
     CryptarchiaConsensus<Tx, Storage, TimeBackend, RuntimeServiceId>
 where
     Tx: Transaction<Hash = TxHash>
-        + AuthenticatedMantleTx
+        + AuthenticatedMantleTx<Context = GasPrices>
         + Debug
         + Clone
         + Eq
