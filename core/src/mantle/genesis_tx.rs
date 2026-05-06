@@ -1,12 +1,11 @@
 use lb_groth16::Fr;
-use lb_poseidon2::Digest;
 use nom::IResult;
 use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
 
 use super::{OpProof, SignedMantleTx, ops::sdp::SDPDeclareOp};
 use crate::{
-    crypto::ZkHasher,
+    crypto::{Digest as _, Hasher},
     mantle::{
         MantleTx, Transaction, TransactionHasher, TxHash,
         encoding::{
@@ -135,11 +134,10 @@ fn valid_cryptarchia_inscription(
 }
 
 impl Transaction for GenesisTx {
-    const HASHER: TransactionHasher<Self> =
-        |tx| <ZkHasher as Digest>::digest(&tx.as_signing_frs()).into();
+    const HASHER: TransactionHasher<Self> = |tx| TxHash(Hasher::digest(tx.as_signing()).into());
     type Hash = TxHash;
-    fn as_signing_frs(&self) -> Vec<Fr> {
-        self.tx.mantle_tx.as_signing_frs()
+    fn as_signing(&self) -> Vec<u8> {
+        self.tx.mantle_tx.as_signing()
     }
 }
 
@@ -362,7 +360,7 @@ mod tests {
             storage_gas_price: GENESIS_STORAGE_GAS_PRICE,
         };
         let mut new_op_proofs = vec![OpProof::ZkSig(
-            ZkKey::multi_sign(&[], mantle_tx.hash().as_ref()).unwrap(),
+            ZkKey::multi_sign(&[], &mantle_tx.hash().to_fr()).unwrap(),
         )];
         new_op_proofs.append(&mut ops_proofs);
         SignedMantleTx {

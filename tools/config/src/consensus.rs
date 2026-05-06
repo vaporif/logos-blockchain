@@ -306,7 +306,7 @@ pub fn create_genesis_block_with_declarations(
 
     for provider in providers {
         let zk_sig =
-            ZkKey::multi_sign(&[provider.note.sk, provider.zk_sk], mantle_tx_hash.as_ref())
+            ZkKey::multi_sign(&[provider.note.sk, provider.zk_sk], &mantle_tx_hash.to_fr())
                 .unwrap();
         let ed25519_sig = provider
             .provider_sk
