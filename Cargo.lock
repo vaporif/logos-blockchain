@@ -4911,10 +4911,12 @@ dependencies = [
  "logos-blockchain-chain-service",
  "logos-blockchain-core",
  "logos-blockchain-key-management-system-keys",
+ "logos-blockchain-services-utils",
  "logos-blockchain-tracing",
  "overwatch",
  "serde",
  "thiserror 2.0.18",
+ "time",
  "tokio",
  "tracing",
 ]
