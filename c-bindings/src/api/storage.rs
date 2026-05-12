@@ -188,9 +188,7 @@ pub unsafe extern "C" fn get_transaction(
     return_error_if_null_pointer!("get_transaction", tx_hash);
 
     let node = unsafe { &*node };
-    let tx_hash = unwrap_or_return_error!(unsafe { into_tx_hash(tx_hash) }, |_| {
-        log::error!("[get_transaction] Invalid `tx_hash`. Exiting.");
-    });
+    let tx_hash = unsafe { into_tx_hash(tx_hash) };
     let json_cstring = unwrap_or_return_error!(get_transaction_sync(node, tx_hash));
     FfiGetTransactionResult::ok(json_cstring.into_raw())
 }
@@ -198,7 +196,7 @@ pub unsafe extern "C" fn get_transaction(
 /// Gets blocks in a slot range as a JSON array string.
 ///
 /// This is a synchronous wrapper around the asynchronous
-/// [`get_blocks`](lb_api_service::http::mantle::get_blocks) function.
+/// [`get_blocks`](lb_api_service::http::mantle::get_immutable_blocks) function.
 ///
 /// # Arguments
 ///
@@ -219,7 +217,7 @@ pub(crate) fn get_blocks_sync(
     let overwatch_handle = node.get_overwatch_handle();
 
     let blocks = runtime_handle
-        .block_on(lb_api_service::http::mantle::get_blocks::<
+        .block_on(lb_api_service::http::mantle::get_immutable_blocks::<
             SignedMantleTx,
             RocksBackend,
             RuntimeServiceId,

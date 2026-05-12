@@ -66,18 +66,14 @@ pub struct TransferValidationContext<'a> {
     pub transfer_sig: &'a ZkSignature,
 }
 
-impl Operation for TransferOp {
-    type ValidationContext<'a>
-        = TransferValidationContext<'a>
-    where
-        Self: 'a;
+impl Operation<TransferValidationContext<'_>> for TransferOp {
     type ExecutionContext<'a>
         = Utxos
     where
         Self: 'a;
     type Error = TransferError;
 
-    fn validate(&self, ctx: &Self::ValidationContext<'_>) -> Result<(), Self::Error> {
+    fn validate(&self, ctx: &TransferValidationContext<'_>) -> Result<(), Self::Error> {
         // Ensure the inputs is non-empty
         if self.inputs.is_empty() {
             return Err(TransferError::NoInputTransfer);
@@ -88,7 +84,7 @@ impl Operation for TransferOp {
         self.outputs.validate()?;
         // Check the transfer Proof
         let pks = self.inputs.get_pk(ctx.utxos)?;
-        if !ZkPublicKey::verify_multi(&pks, &ctx.tx_hash.0, ctx.transfer_sig) {
+        if !ZkPublicKey::verify_multi(&pks, &ctx.tx_hash.to_fr(), ctx.transfer_sig) {
             return Err(TransferError::InvalidProof);
         }
         Ok(())

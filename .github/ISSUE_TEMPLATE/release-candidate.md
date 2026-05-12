@@ -41,15 +41,13 @@ Most of the template content is the same or very similar to what is in `release.
 - [ ] Push to `devnet` branch to trigger the ceremony and generate a new genesis state
 - [ ] Wait around 1 minute for deployment to be updated with the new changes and for the ceremony to happen. Until ready, you should see a `502` error while the containers restart when visiting [https://devnet.blockchain.logos.co/web/cfgsync/deployment-settings](https://devnet.blockchain.logos.co/web/cfgsync/deployment-settings)
 - [ ] Download the new deployment configuration from the link above
-- [ ] Verify that the `time.chain_start_time` value in the deployment file indicates the right start time, which should be within the last few minutes
 - [ ] Copy-paste or attach the content of the deployment file to this issue for easier review
 - [ ] Override the existing devnet deployment settings with the generated ones on the release branch
-- [ ] Verify `git` shows a diff for the deployment file, otherwise it means something went wrong when downloading the new one from the deployment settings endpoint
+- [ ] Verify `git` shows a diff for the deployment file, specifically in the first operation of the genesis tx which includes the chain start time, otherwise it means something went wrong when downloading the new one from the deployment settings endpoint
 
 ## Release candidate publication
 
 - [ ] Bump the Cargo workspace version to match the new release version `X.Y.Z-rc.N`
-- [ ] Bump the version value for the C bindings (`logos-blockchain-c`) in the root `flake.nix` file to match the new release version `X.Y.Z-rc.N`
 - [ ] Verify the HEAD of the release branch has green CI ✅
 - [ ] Tag the commit with `X.Y.Z-rc.N` and push the tag
 - [ ] Manually trigger the [bundling workflow][release-bundling-workflow] from the `X.Y.Z-rc.N` tag on GitHub with the `release-candidate` input to prepare the GitHub release draft with the build binaries
@@ -58,9 +56,11 @@ Most of the template content is the same or very similar to what is in `release.
 - [ ] Address checklist of the generated GitHub release in [https://github.com/logos-blockchain/logos-blockchain/releases](https://github.com/logos-blockchain/logos-blockchain/releases)
 - [ ] Publish release
 - [ ] Post the link to the published release to this issue for easier review
+- [ ] Post the link to the Docker image building workflow as appearing in [the Actions section][node-docker-build-workflow]
 
 ## Devnet deployment
 
+- [ ] Wait for the new Docker image to be built after the release is published. It must have the `X.Y.Z-rc.N` tag.
 - [ ] Checkout `devnet` branch again and change the `compose.static.yml` symlink to now point to `compose.run.yml` with `ln -s -f compose.run.yml compose.static.yml`
 - [ ] Update `.env.devnet` file to contain `NODE_IMAGE_LABEL=X.Y.Z-rc.N` set to latest version
 - [ ] Commit and push the changes to trigger environment re-deployment. Environment is now live.
@@ -80,3 +80,4 @@ Most of the template content is the same or very similar to what is in `release.
 [release-bundling-workflow]: https://github.com/logos-blockchain/logos-blockchain/actions/workflows/prepare-release.yml
 [devnet-deployment-section]: #devnet-deployment
 [github-release-candidate-section]: #release-candidate-publication
+[node-docker-build-workflow]: https://github.com/logos-blockchain/logos-blockchain/actions/workflows/publish-node-image.yml

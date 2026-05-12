@@ -32,18 +32,14 @@ pub struct DepositExecutionContext {
     pub utxos: Utxos,
 }
 
-impl Operation for DepositOp {
-    type ValidationContext<'a>
-        = DepositValidationContext<'a>
-    where
-        Self: 'a;
+impl Operation<DepositValidationContext<'_>> for DepositOp {
     type ExecutionContext<'a>
         = DepositExecutionContext
     where
         Self: 'a;
     type Error = Error;
 
-    fn validate(&self, ctx: &Self::ValidationContext<'_>) -> Result<(), Self::Error> {
+    fn validate(&self, ctx: &DepositValidationContext<'_>) -> Result<(), Self::Error> {
         // Check that the channel exist
         if !ctx.channels.channels.contains_key(&self.channel_id) {
             return Err(Error::ChannelNotFound {
@@ -56,7 +52,7 @@ impl Operation for DepositOp {
 
         // Check the signature
         let pks = self.inputs.get_pk(ctx.utxos)?;
-        if !ZkPublicKey::verify_multi(&pks, &ctx.tx_hash.0, ctx.deposit_sig) {
+        if !ZkPublicKey::verify_multi(&pks, &ctx.tx_hash.to_fr(), ctx.deposit_sig) {
             return Err(Error::InvalidSignature);
         }
 

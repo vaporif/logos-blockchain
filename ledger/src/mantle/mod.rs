@@ -66,10 +66,8 @@ impl LedgerState {
     pub fn new(config: &Config, epoch_state: &EpochState) -> Self {
         Self {
             channels: channel::Channels::new(),
-            sdp: sdp::SdpLedger::new().with_blend_service(
-                config.sdp_config.service_rewards_params.blend.clone(),
-                epoch_state,
-            ),
+            sdp: sdp::SdpLedger::new()
+                .with_blend_service(&config.sdp_config.service_rewards_params.blend, epoch_state),
             leaders: leader::LeaderState::new(),
         }
     }
@@ -85,7 +83,6 @@ impl LedgerState {
             &config.sdp_config,
             utxo_tree,
             epoch_state,
-            tx.hash(),
             tx.sdp_declarations(),
         )?;
 

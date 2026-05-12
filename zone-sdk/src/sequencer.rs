@@ -1,7 +1,7 @@
 use std::time::Duration;
 
 use futures::{StreamExt as _, future::BoxFuture, stream::FuturesUnordered};
-use lb_common_http_client::{ProcessedBlockEvent, Slot};
+use lb_common_http_client::{ChainServiceInfo, ProcessedBlockEvent, Slot};
 use lb_core::{
     header::HeaderId,
     mantle::{
@@ -21,6 +21,7 @@ use tracing::{debug, info, warn};
 
 use crate::{
     adapter,
+    adapter::BoxStream,
     state::{InscriptionInfo, TxState},
 };
 
@@ -383,7 +384,7 @@ pub struct ZoneSequencer<Node> {
     last_msg_id: MsgId,
 
     // Block stream
-    blocks_stream: Option<adapter::BoxStream<ProcessedBlockEvent>>,
+    blocks_stream: Option<BoxStream<ProcessedBlockEvent>>,
 
     // Resubmission
     resubmit_interval: tokio::time::Interval,
@@ -459,7 +460,7 @@ where
                 // Filter by `channel_id` — a checkpoint can in principle carry
                 // txs for other channels if the caller reused it.
                 let mut is_inscription = false;
-                for op in &tx.mantle_tx.ops {
+                for op in tx.mantle_tx.ops() {
                     if let Op::ChannelInscribe(inscribe) = op
                         && inscribe.channel_id == channel_id
                     {
@@ -715,12 +716,14 @@ where
             return true;
         }
         match self.node.consensus_info().await {
-            Ok(info) => {
+            Ok(ChainServiceInfo {
+                cryptarchia_info, ..
+            }) => {
                 info!(
                     "Sequencer connected: tip={:?}, lib={:?}",
-                    info.tip, info.lib
+                    cryptarchia_info.tip, cryptarchia_info.lib
                 );
-                self.state = Some(TxState::new(info.lib, MsgId::root()));
+                self.state = Some(TxState::new(cryptarchia_info.lib, MsgId::root()));
                 true
             }
             Err(e) => {
@@ -755,8 +758,10 @@ where
             return true;
         }
         match self.node.consensus_info().await {
-            Ok(info) => {
-                let network_lib_slot = info.lib_slot;
+            Ok(ChainServiceInfo {
+                cryptarchia_info, ..
+            }) => {
+                let network_lib_slot = cryptarchia_info.lib_slot;
                 let from: u64 = self.lib_slot.into();
                 let to: u64 = network_lib_slot.into();
                 if from < to {
@@ -1180,7 +1185,7 @@ where
     };
 
     match node
-        .blocks(Slot::from(from_slot), Slot::from(to_slot))
+        .immutable_blocks(Slot::from(from_slot), Slot::from(to_slot))
         .await
     {
         Ok(blocks) => {
@@ -1315,7 +1320,7 @@ fn enqueue_resubmit<Node>(
     for (id, tx) in &pending {
         let payloads: Vec<String> = tx
             .mantle_tx
-            .ops
+            .ops()
             .iter()
             .filter_map(|op| {
                 if let Op::ChannelInscribe(ins) = op {
@@ -1355,7 +1360,7 @@ fn extract_inscriptions(txs: &[SignedMantleTx], channel_id: ChannelId) -> Vec<In
     let items: Vec<InscriptionInfo> = txs
         .iter()
         .flat_map(|tx| {
-            tx.mantle_tx.ops.iter().filter_map(|op| {
+            tx.mantle_tx.ops().iter().filter_map(|op| {
                 if let Op::ChannelInscribe(inscribe) = op
                     && inscribe.channel_id == channel_id
                 {
@@ -1398,7 +1403,7 @@ fn extract_inscriptions(txs: &[SignedMantleTx], channel_id: ChannelId) -> Vec<In
 }
 
 fn matches_channel(tx: &SignedMantleTx, channel_id: ChannelId) -> bool {
-    tx.mantle_tx.ops.iter().any(|op| match op {
+    tx.mantle_tx.ops().iter().any(|op| match op {
         Op::ChannelInscribe(inscribe) => inscribe.channel_id == channel_id,
         Op::ChannelSetKeys(set_keys) => set_keys.channel == channel_id,
         _ => false,
@@ -1422,11 +1427,7 @@ fn create_inscribe_tx(
     let msg_id = inscribe_op.id();
 
     // TODO: set realistic gas prices and fund tx
-    let inscribe_tx = MantleTx {
-        ops: vec![Op::ChannelInscribe(inscribe_op)],
-        storage_gas_price: 0.into(),
-        execution_gas_price: 0.into(),
-    };
+    let inscribe_tx = MantleTx(vec![Op::ChannelInscribe(inscribe_op)]);
 
     let tx_hash = inscribe_tx.hash();
     let signature = sign_tx(tx_hash, signing_key);
@@ -1449,12 +1450,8 @@ fn create_set_keys_tx(
         keys,
     };
 
-    // TODO: set realistic gas prices and fund tx
-    let set_keys_tx = MantleTx {
-        ops: vec![Op::ChannelSetKeys(set_keys_op)],
-        storage_gas_price: 0.into(),
-        execution_gas_price: 0.into(),
-    };
+    // TODO: fund tx
+    let set_keys_tx = MantleTx(vec![Op::ChannelSetKeys(set_keys_op)]);
 
     let tx_hash = set_keys_tx.hash();
     let signature = sign_tx(tx_hash, signing_key);
@@ -1481,12 +1478,8 @@ fn prepare_tx(
     let msg_id = inscription_op.id();
     ops.push(Op::ChannelInscribe(inscription_op));
 
-    // TODO: set realistic gas prices and fund tx
-    let tx = MantleTx {
-        ops,
-        storage_gas_price: 0.into(),
-        execution_gas_price: 0.into(),
-    };
+    // TODO: fund tx
+    let tx = MantleTx(ops);
 
     let inscription_sig = sign_tx(tx.hash(), signing_key);
 
@@ -1499,8 +1492,12 @@ fn sign_tx(tx_hash: TxHash, signing_key: &Ed25519Key) -> Ed25519Signature {
 
 #[cfg(test)]
 mod tests {
+    use std::num::NonZero;
+
     use async_trait::async_trait;
-    use lb_common_http_client::{ApiBlock, ApiHeader, BlockInfo, CryptarchiaInfo, State};
+    use lb_common_http_client::{
+        ApiBlock, ApiHeader, BlockInfo, ChainServiceMode, CryptarchiaInfo, State,
+    };
     use lb_core::{
         header::ContentId,
         mantle::{Note, Utxo, ledger::Inputs, ops::channel::deposit::DepositOp},
@@ -1562,16 +1559,16 @@ mod tests {
                 _ = sequencer.next_event() => {}
             }
         };
-        assert_eq!(tx.ops.len(), 2);
-        assert_eq!(&tx.ops[0], &Op::ChannelDeposit(deposit_op));
-        assert!(matches!(&tx.ops[1], &Op::ChannelInscribe(_)));
+        assert_eq!(tx.ops().len(), 2);
+        assert_eq!(&tx.ops()[0], &Op::ChannelDeposit(deposit_op));
+        assert!(matches!(&tx.ops()[1], &Op::ChannelInscribe(_)));
 
         // Sign the `MantleTx`
         let signed_tx = SignedMantleTx::new(
             tx.clone(),
             vec![
                 OpProof::ZkSig(
-                    ZkKey::multi_sign(std::slice::from_ref(&sk), tx.clone().hash().as_ref())
+                    ZkKey::multi_sign(std::slice::from_ref(&sk), &tx.clone().hash().to_fr())
                         .unwrap(),
                 ),
                 OpProof::Ed25519Sig(inscription_sig),
@@ -1612,20 +1609,22 @@ mod tests {
 
     #[async_trait]
     impl adapter::Node for MockNode {
-        async fn consensus_info(&self) -> Result<CryptarchiaInfo, lb_common_http_client::Error> {
-            Ok(CryptarchiaInfo {
-                lib: HeaderId::from([0; 32]),
-                lib_slot: Slot::genesis(),
-                tip: HeaderId::from([0; 32]),
-                slot: Slot::genesis(),
-                height: 0,
-                mode: State::Online,
+        async fn consensus_info(&self) -> Result<ChainServiceInfo, lb_common_http_client::Error> {
+            Ok(ChainServiceInfo {
+                cryptarchia_info: CryptarchiaInfo {
+                    lib: HeaderId::from([0; 32]),
+                    lib_slot: Slot::genesis(),
+                    tip: HeaderId::from([0; 32]),
+                    slot: Slot::genesis(),
+                    height: 0,
+                },
+                mode: ChainServiceMode::Started(State::Online),
             })
         }
 
         async fn block_stream(
             &self,
-        ) -> Result<adapter::BoxStream<ProcessedBlockEvent>, lb_common_http_client::Error> {
+        ) -> Result<BoxStream<ProcessedBlockEvent>, lb_common_http_client::Error> {
             Ok(Box::pin(
                 futures::stream::once(async {
                     ProcessedBlockEvent {
@@ -1649,9 +1648,19 @@ mod tests {
             ))
         }
 
-        async fn lib_stream(
+        async fn blocks_range_stream(
             &self,
-        ) -> Result<adapter::BoxStream<BlockInfo>, lb_common_http_client::Error> {
+            _blocks_limit: Option<NonZero<usize>>,
+            _slot_from: Option<u64>,
+            _slot_to: Option<u64>,
+            _descending: Option<bool>,
+            _server_batch_size: Option<NonZero<usize>>,
+            _immutable_only: Option<bool>,
+        ) -> Result<BoxStream<ProcessedBlockEvent>, lb_common_http_client::Error> {
+            unimplemented!()
+        }
+
+        async fn lib_stream(&self) -> Result<BoxStream<BlockInfo>, lb_common_http_client::Error> {
             Ok(Box::pin(futures::stream::pending()))
         }
 
@@ -1662,7 +1671,7 @@ mod tests {
             unimplemented!()
         }
 
-        async fn blocks(
+        async fn immutable_blocks(
             &self,
             _slot_from: Slot,
             _slot_to: Slot,
@@ -1674,7 +1683,7 @@ mod tests {
             &self,
             _id: HeaderId,
             _channel_id: ChannelId,
-        ) -> Result<adapter::BoxStream<ZoneMessage>, lb_common_http_client::Error> {
+        ) -> Result<BoxStream<ZoneMessage>, lb_common_http_client::Error> {
             Ok(Box::pin(futures::stream::pending()))
         }
 
@@ -1683,7 +1692,7 @@ mod tests {
             _slot_from: Slot,
             _slot_to: Slot,
             _channel_id: ChannelId,
-        ) -> Result<adapter::BoxStream<(ZoneMessage, Slot)>, lb_common_http_client::Error> {
+        ) -> Result<BoxStream<(ZoneMessage, Slot)>, lb_common_http_client::Error> {
             Ok(Box::pin(futures::stream::pending()))
         }
 

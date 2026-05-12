@@ -1,4 +1,4 @@
-use std::time::Duration;
+use std::{str::FromStr as _, time::Duration};
 
 use cucumber::{gherkin::Step, given, then, when};
 use tracing::{info, warn};
@@ -10,7 +10,13 @@ use crate::{
             TARGET,
             manual_transactions::{
                 best_node::get_best_node_info,
-                command_file_utils::perform_manual_step_control,
+                command_file_parsing::ManualCommand,
+                command_file_utils::{
+                    execute_coin_splits_all_user_wallets,
+                    execute_continuous_next_wallet_user_wallet,
+                    execute_continuous_round_robin_user_wallets, perform_manual_step_control,
+                    verify_min_outputs_all_user_wallets,
+                },
                 tracked_transactions::{
                     submit_funded_transfer_transaction, submit_invalid_transfer_transaction,
                     transaction_is_not_included_in_seconds,
@@ -18,8 +24,8 @@ use crate::{
                 utils,
                 utils::{
                     WalletStateType, assert_tracked_wallet_fees_equal_sponsored_fee_account_spend,
-                    create_and_submit_transaction, wait_for_exact_settled_wallet_balance,
-                    wait_for_transactions_inclusion, wait_for_wallet_or_encumbered_state,
+                    create_and_submit_transaction, wait_for_transactions_inclusion,
+                    wait_for_wallet_or_encumbered_state,
                 },
             },
         },
@@ -108,6 +114,29 @@ async fn step_wallet_has_at_most_coins(
     .await
 }
 
+#[when(expr = "wallet {string} has exactly {int} outputs in {int} seconds")]
+#[then(expr = "wallet {string} has exactly {int} outputs in {int} seconds")]
+async fn step_wallet_has_exact_coins(
+    world: &mut CucumberWorld,
+    step: &Step,
+    wallet_name: String,
+    coin_count: usize,
+    time_out_seconds: u64,
+) -> StepResult {
+    wait_for_wallet_or_encumbered_state(
+        world,
+        &step.value,
+        wallet_name,
+        Some(&coin_count),
+        Some(&coin_count),
+        None,
+        None,
+        time_out_seconds,
+        WalletStateType::OnChain,
+    )
+    .await
+}
+
 #[when(expr = "wallet {string} has {int} or less encumbered outputs in {int} seconds")]
 #[then(expr = "wallet {string} has {int} or less encumbered outputs in {int} seconds")]
 async fn step_wallet_has_at_most_encumbered_coins(
@@ -148,6 +177,29 @@ async fn step_wallet_has_at_least_value(
         None,
         Some(&min_token_value),
         None,
+        time_out_seconds,
+        WalletStateType::OnChain,
+    )
+    .await
+}
+
+#[when(expr = "wallet {string} has exactly {int} LGO in {int} seconds")]
+#[then(expr = "wallet {string} has exactly {int} LGO in {int} seconds")]
+async fn step_wallet_has_exact_value(
+    world: &mut CucumberWorld,
+    step: &Step,
+    wallet_name: String,
+    token_value: u64,
+    time_out_seconds: u64,
+) -> StepResult {
+    wait_for_wallet_or_encumbered_state(
+        world,
+        &step.value,
+        wallet_name,
+        None,
+        None,
+        Some(&token_value),
+        Some(&token_value),
         time_out_seconds,
         WalletStateType::OnChain,
     )
@@ -225,21 +277,26 @@ async fn step_wallet_has_at_most_coins_and_value(
     .await
 }
 
-#[when(expr = "wallet {string} has exact settled balance of {int} LGO in {int} seconds")]
-#[then(expr = "wallet {string} has exact settled balance of {int} LGO in {int} seconds")]
-async fn step_wallet_has_exact_settled_balance(
+#[when(expr = "wallet {string} has exactly {int} outputs and {int} LGO in {int} seconds")]
+#[then(expr = "wallet {string} has exactly {int} outputs and {int} LGO in {int} seconds")]
+async fn step_wallet_has_exact_coins_and_value(
     world: &mut CucumberWorld,
     step: &Step,
     wallet_name: String,
-    nominal_token_value: u64,
+    coin_count: usize,
+    token_value: u64,
     time_out_seconds: u64,
 ) -> StepResult {
-    wait_for_exact_settled_wallet_balance(
+    wait_for_wallet_or_encumbered_state(
         world,
         &step.value,
-        &wallet_name,
-        nominal_token_value,
+        wallet_name,
+        Some(&coin_count),
+        Some(&coin_count),
+        Some(&token_value),
+        Some(&token_value),
         time_out_seconds,
+        WalletStateType::OnChain,
     )
     .await
 }
@@ -435,6 +492,113 @@ async fn step_manual_control_transactions_no_time_out(
     step: &Step,
 ) -> StepResult {
     perform_manual_step_control(world, &step.value, u64::MAX).await
+}
+
+#[when(
+    expr = "I perform continuous transactions on user wallets with {int} coin split outputs of {int} LGO, {int} transactions of {int} LGO each for {int} cycles"
+)]
+async fn step_continuous_user_wallets(
+    world: &mut CucumberWorld,
+    step: &Step,
+    coin_split_outputs: usize,
+    coin_split_value: u64,
+    transactions: usize,
+    value: u64,
+    cycles: usize,
+) -> StepResult {
+    info!(
+        target: TARGET,
+        "Starting continuous user wallet transactions: coin_split_outputs={coin_split_outputs}, coin_split_value={coin_split_value}, transactions={transactions}, value={value}, cycles={cycles}"
+    );
+
+    execute_continuous_round_robin_user_wallets(
+        world,
+        &step.value,
+        coin_split_outputs,
+        coin_split_value,
+        transactions,
+        value,
+        cycles,
+    )
+    .await
+    .inspect_err(|e| {
+        warn!(target: TARGET, "Step `{}` error: {e}", step.value);
+    })?;
+
+    info!(target: TARGET, "Completed continuous user wallet transactions step");
+
+    Ok(())
+}
+
+#[when(
+    expr = "I perform {int} coin split transactions for each user wallet with {int} outputs of {int} LGO each"
+)]
+async fn step_coin_split_transactions_for_each_user_wallet(
+    world: &mut CucumberWorld,
+    step: &Step,
+    splits_per_wallet: usize,
+    outputs: usize,
+    value: u64,
+) -> StepResult {
+    execute_coin_splits_all_user_wallets(world, &step.value, splits_per_wallet, outputs, value)
+        .await
+        .inspect_err(|e| {
+            warn!(target: TARGET, "Step `{}` error: {e}", step.value);
+        })?;
+
+    Ok(())
+}
+
+#[when(expr = "I verify each wallet has minimum {int} outputs {string} in {int} seconds")]
+async fn step_verify_each_wallet_minimum_outputs(
+    world: &mut CucumberWorld,
+    step: &Step,
+    min_outputs: usize,
+    wallet_state_type: String,
+    timeout_seconds: u64,
+) -> StepResult {
+    verify_min_outputs_all_user_wallets(
+        world,
+        &step.value,
+        min_outputs,
+        timeout_seconds,
+        WalletStateType::from_str(&wallet_state_type).inspect_err(|e| {
+            warn!(target: TARGET, "Step `{}` error: {e}", step.value);
+        })?,
+    )
+    .await
+    .inspect_err(|e| {
+        warn!(target: TARGET, "Step `{}` error: {e}", step.value);
+    })?;
+
+    Ok(())
+}
+
+#[when(
+    expr = "I perform {int} stress continuous cycles with {int} transactions of {int} LGO to the next user wallet"
+)]
+async fn step_perform_stress_continuous_cycles_next_user_wallet(
+    world: &mut CucumberWorld,
+    step: &Step,
+    cycles: usize,
+    transactions_per_wallet: usize,
+    value: u64,
+) -> StepResult {
+    execute_continuous_next_wallet_user_wallet(
+        world,
+        &step.value,
+        &ManualCommand::ContinuousNextWalletUserWallets {
+            cycles,
+            transactions_per_wallet,
+            value,
+        },
+    )
+    .await
+    .inspect_err(|e| {
+        warn!(target: TARGET, "Step `{}` error: {e}", step.value);
+    })?;
+
+    Ok(())
 }
 
 #[given(expr = "I update all user wallets balances")]

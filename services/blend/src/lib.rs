@@ -10,6 +10,7 @@ use futures::StreamExt as _;
 pub use lb_blend::message::{crypto::proofs::RealProofsVerifier, encap::ProofsVerifier};
 use lb_blend::scheduling::session::UninitializedSessionEventStream;
 use lb_key_management_system_service::{api::KmsServiceApi, keys::PublicKeyEncoding};
+use lb_log_targets::blend;
 use lb_network_service::NetworkService;
 use lb_services_utils::wait_until_services_are_ready;
 use overwatch::{
@@ -32,7 +33,10 @@ use crate::{
     edge::service_components::ServiceComponents as EdgeServiceComponents,
     instance::{Instance, Mode},
     kms::PreloadKmsService,
-    membership::{Adapter as _, MembershipInfo},
+    membership::{
+        Adapter as _, MembershipInfo,
+        node_id::{self, TryFrom as _},
+    },
     settings::{FIRST_STREAM_ITEM_READY_TIMEOUT, Settings},
 };
 
@@ -54,7 +58,7 @@ pub use self::service_components::ServiceComponents;
 #[cfg(test)]
 mod test_utils;
 
-const LOG_TARGET: &str = "blend::service";
+const LOG_TARGET: &str = blend::service::ROOT;
 
 pub struct BlendService<CoreService, EdgeService, RuntimeServiceId>
 where
@@ -97,7 +101,7 @@ where
             > + Send
                                 + Sync
                                 + 'static,
-            NodeId: Clone + Debug + Hash + Eq + Send + Sync + 'static,
+            NodeId: Clone + Debug + Hash + Eq + Send + Sync + node_id::TryFrom + 'static,
             BackendSettings: Clone + Send + Sync,
         > + Send
         + 'static,
@@ -172,6 +176,9 @@ where
         else {
             panic!("Non-ephemeral signing key must be an Ed25519 key");
         };
+        let local_node_id =
+            CoreService::NodeId::try_from_provider_id(non_ephemeral_signing_key_public.as_bytes())
+                .expect("non-ephemeral signing public key should decode into a valid node id");
 
         let membership_stream = <MembershipAdapter<EdgeService> as membership::Adapter>::new(
             overwatch_handle
@@ -203,6 +210,7 @@ where
 
         let mut instance = Instance::<CoreService, EdgeService, RuntimeServiceId>::new(
             Mode::choose(&membership, minimal_network_size),
+            local_node_id.clone(),
             overwatch_handle,
         )
         .await?;
@@ -218,7 +226,14 @@ where
             tokio::select! {
                 Some(session_event) = remaining_session_stream.next() => {
                     debug!(target: LOG_TARGET, ?session_event, "received session event");
-                    instance = instance.handle_session_event(session_event, overwatch_handle, minimal_network_size).await?;
+                    instance = instance
+                        .handle_session_event(
+                            session_event,
+                            overwatch_handle,
+                            minimal_network_size,
+                            local_node_id.clone(),
+                        )
+                        .await?;
                 },
                 Some(message) = inbound_relay.next() => {
                     if let Err(e) = instance.handle_inbound_message(message).await {

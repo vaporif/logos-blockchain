@@ -28,6 +28,7 @@ use lb_key_management_system_service::{
     api::KmsServiceApi, keys::KeyOperators,
     operators::ed25519::exfiltrate_secret_key::LeakSecretKeyOperator,
 };
+use lb_log_targets::blend;
 use lb_services_utils::wait_until_services_are_ready;
 use lb_time_service::{SlotTick, TimeService, TimeServiceMessage};
 use overwatch::{
@@ -54,12 +55,12 @@ use crate::{
         ChainApi, EpochEvent, EpochHandler, PolEpochInfo, PolInfoProvider as PolInfoProviderTrait,
     },
     kms::PreloadKmsService,
-    membership::{self, MembershipInfo},
-    message::{NetworkMessage, ServiceMessage},
+    membership::{self, MembershipInfo, node_id},
+    message::{NetworkInfo, NetworkMessage, ServiceMessage},
     settings::FIRST_STREAM_ITEM_READY_TIMEOUT,
 };
 
-const LOG_TARGET: &str = "blend::service::edge";
+const LOG_TARGET: &str = blend::service::EDGE;
 
 type RunningSettings<Backend, NodeId, RuntimeServiceId> =
     RunningBlendConfig<<Backend as BlendBackend<NodeId, RuntimeServiceId>>::Settings>;
@@ -151,7 +152,7 @@ impl<
     >
 where
     Backend: BlendBackend<NodeId, RuntimeServiceId> + Send + Sync,
-    NodeId: Clone + Debug + Eq + Hash + Send + Sync + 'static,
+    NodeId: Clone + Debug + Eq + Hash + Send + Sync + node_id::TryFrom + 'static,
     BroadcastSettings: Serialize + DeserializeOwned + Send,
     MembershipAdapter: membership::Adapter<NodeId = NodeId, Error: Send + Sync + 'static> + Send,
     membership::ServiceMessage<MembershipAdapter>: Send + Sync + 'static,
@@ -224,6 +225,9 @@ where
                 .await
                 .expect("Failed to retrieve non-ephemeral signing key from KMS.")
         };
+        let local_node_id =
+            NodeId::try_from_provider_id(&non_ephemeral_signing_key.public_key().to_bytes())
+                .expect("non-ephemeral signing key should decode into a valid node id");
 
         // Initialize membership stream for session and core-related public PoQ inputs.
         let session_stream = MembershipAdapter::new(
@@ -264,8 +268,10 @@ where
                         .to_vec(),
                 ),
                 ServiceMessage::GetNetworkInfo { reply } => {
-                    // Edge nodes don't return any Blend peer info.
-                    drop(reply.send(None));
+                    drop(reply.send(Some(NetworkInfo {
+                        node_id: local_node_id.clone(),
+                        core_info: None,
+                    })));
                     None
                 }
             }

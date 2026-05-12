@@ -8,10 +8,12 @@ use std::{
 use lb_core::{
     mantle::{
         GenesisTx as _, MantleTx, NoteId, OpProof, SignedMantleTx, Transaction as _, Utxo,
-        genesis_tx::GENESIS_STORAGE_GAS_PRICE, ops::Op, tx::MantleTxGasContext,
+        genesis_tx::GENESIS_STORAGE_GAS_PRICE,
+        ops::Op,
+        tx::{GasPrices, MantleTxGasContext},
         tx_builder::MantleTxBuilder,
     },
-    sdp::{Declaration, DeclarationMessage, Locator, ServiceType, WithdrawMessage},
+    sdp::{Declaration, DeclarationMessage, ServiceType, WithdrawMessage},
 };
 use lb_key_management_system_service::keys::{Ed25519Key, Ed25519Signature, ZkKey};
 use lb_node::config::RunConfig;
@@ -83,11 +85,9 @@ async fn sdp_ops_e2e() {
     let provider_signing_key = Ed25519Key::from_bytes(&[7u8; 32]);
     let provider_zk_key = ZkKey::from(BigUint::from(7u64));
     let zk_id = provider_zk_key.to_public_key();
-    let locator = Locator(
-        "/ip4/127.0.0.1/tcp/9100"
-            .parse()
-            .expect("Valid locator multiaddr"),
-    );
+    let locator = "/ip4/127.0.0.1/tcp/9100"
+        .parse()
+        .expect("Valid locator multiaddr");
 
     let declaration = DeclarationMessage {
         service_type: ServiceType::BlendNetwork,
@@ -116,11 +116,11 @@ async fn sdp_ops_e2e() {
     );
     let declare_zk_sig = ZkKey::multi_sign(
         &[spare_note_secret_key.clone(), provider_zk_key.clone()],
-        declare_hash.as_ref(),
+        &declare_hash.to_fr(),
     )
     .expect("SDP declare zk proof should build");
     let declare_transfer_proof = OpProof::ZkSig(
-        ZkKey::multi_sign(&declare_signing_keys, declare_hash.as_ref())
+        ZkKey::multi_sign(&declare_signing_keys, &declare_hash.to_fr())
             .expect("transfer proof should build"),
     );
     let declare_tx = SignedMantleTx::new(
@@ -180,12 +180,12 @@ async fn sdp_ops_e2e() {
     let withdraw_hash = withdraw_mantle_tx.hash();
     let withdraw_zk_sig = ZkKey::multi_sign(
         &[spare_note_secret_key.clone(), provider_zk_key.clone()],
-        withdraw_hash.as_ref(),
+        &withdraw_hash.to_fr(),
     )
     .expect("SDP withdraw zk proof should build");
 
     let withdraw_transfer_proof = OpProof::ZkSig(
-        ZkKey::multi_sign(&withdraw_signing_keys, withdraw_hash.as_ref())
+        ZkKey::multi_sign(&withdraw_signing_keys, &withdraw_hash.to_fr())
             .expect("transfer proof should build"),
     );
 
@@ -366,7 +366,7 @@ async fn start_sdp_manual_cluster(
     let base = build_local_manual_cluster(
         test_name,
         "tf-sdp",
-        DeploymentBuilder::new(TfTopologyConfig::with_node_numbers(2))
+        DeploymentBuilder::new(TfTopologyConfig::with_node_numbers(1))
             .with_wallet_config(WalletConfig::new(vec![
                 funding_wallet.clone(),
                 spare_wallet.clone(),
@@ -376,7 +376,6 @@ async fn start_sdp_manual_cluster(
 
     let cluster = base.cluster;
     let node0_persist_dir = base.scenario_base_dir.join("node-0");
-    let node1_persist_dir = base.scenario_base_dir.join("node-1");
 
     let node0 = cluster
         .start_node_with(
@@ -387,16 +386,6 @@ async fn start_sdp_manual_cluster(
         )
         .await
         .expect("starting node-0 should succeed");
-
-    cluster
-        .start_node_with(
-            "1",
-            StartNodeOptions::default()
-                .with_persist_dir(node1_persist_dir)
-                .create_patch(|config| Ok::<_, DynError>(patch_sdp_manual_cluster_config(config))),
-        )
-        .await
-        .expect("starting node-1 should succeed");
 
     cluster
         .wait_network_ready()
@@ -475,15 +464,18 @@ async fn fund_sdp_transaction(
     let funding_public_key = funding_secret_key.to_public_key();
     let funding_utxos = current_utxos_for_public_key(node, genesis_utxos, funding_public_key).await;
 
-    let empty_context = MantleTxGasContext::new(HashMap::new());
+    let empty_context = MantleTxGasContext::new(
+        HashMap::new(),
+        GasPrices {
+            execution_base_gas_price: 0.into(),
+            storage_gas_price: GENESIS_STORAGE_GAS_PRICE,
+        },
+    );
     let tx_context = lb_core::mantle::tx::MantleTxContext {
         gas_context: empty_context,
         leader_reward_amount: 0,
     };
-    let tx_builder = MantleTxBuilder::new(tx_context)
-        .push_op(extra_op)
-        .set_storage_gas_price(GENESIS_STORAGE_GAS_PRICE)
-        .set_execution_gas_price(0.into());
+    let tx_builder = MantleTxBuilder::new(tx_context).push_op(extra_op);
 
     let funded_builder =
         fund_transfer_builder_from_utxos(funding_utxos, &tx_builder, funding_public_key)

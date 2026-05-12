@@ -21,18 +21,14 @@ pub struct SDPActiveExecutionContext {
     pub declarations: Declarations,
 }
 
-impl Operation for SDPActiveOp {
-    type ValidationContext<'a>
-        = SDPActiveValidationContext<'a>
-    where
-        Self: 'a;
+impl Operation<SDPActiveValidationContext<'_>> for SDPActiveOp {
     type ExecutionContext<'a>
         = SDPActiveExecutionContext
     where
         Self: 'a;
     type Error = SdpError;
 
-    fn validate(&self, ctx: &Self::ValidationContext<'_>) -> Result<(), Self::Error> {
+    fn validate(&self, ctx: &SDPActiveValidationContext<'_>) -> Result<(), Self::Error> {
         // Check the declaration exist
         let Some(declaration) = ctx.declarations.get(&self.declaration_id) else {
             return Err(SdpError::DeclarationNotFound(self.declaration_id));
@@ -47,7 +43,7 @@ impl Operation for SDPActiveOp {
         }
 
         // Check the signature over the `zk_id`
-        if !ZkPublicKey::verify_multi(&[declaration.zk_id], &ctx.tx_hash.0, ctx.active_sig) {
+        if !ZkPublicKey::verify_multi(&[declaration.zk_id], &ctx.tx_hash.to_fr(), ctx.active_sig) {
             return Err(SdpError::InvalidZkSignature);
         }
 

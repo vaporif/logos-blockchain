@@ -26,18 +26,14 @@ pub struct SDPWithdrawExecutionContext {
     pub locked_notes: LockedNotes,
 }
 
-impl Operation for SDPWithdrawOp {
-    type ValidationContext<'a>
-        = SDPWithdrawValidationContext<'a>
-    where
-        Self: 'a;
+impl Operation<SDPWithdrawValidationContext<'_>> for SDPWithdrawOp {
     type ExecutionContext<'a>
         = SDPWithdrawExecutionContext
     where
         Self: 'a;
     type Error = SdpError;
 
-    fn validate(&self, ctx: &Self::ValidationContext<'_>) -> Result<(), Self::Error> {
+    fn validate(&self, ctx: &SDPWithdrawValidationContext<'_>) -> Result<(), Self::Error> {
         // Check that the declaration exists
         let Some(declaration) = ctx.declarations.get(&self.declaration_id) else {
             return Err(SdpError::DeclarationNotFound(self.declaration_id));
@@ -76,7 +72,7 @@ impl Operation for SDPWithdrawOp {
             .expect("The Operation has been checked above");
         if !ZkPublicKey::verify_multi(
             &[note.pk, declaration.zk_id],
-            &ctx.tx_hash.0,
+            &ctx.tx_hash.to_fr(),
             ctx.sdp_withdraw_sig,
         ) {
             return Err(SdpError::InvalidZkSignature);

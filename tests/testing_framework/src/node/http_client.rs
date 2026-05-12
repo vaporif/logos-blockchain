@@ -1,11 +1,11 @@
-use std::{net::SocketAddr, pin::Pin};
+use std::{net::SocketAddr, num::NonZero, pin::Pin};
 
 use common_http_client::{
     ApiBlock, BasicAuthCredentials, CommonHttpClient, Error, ProcessedBlockEvent,
 };
 use futures::Stream;
 use lb_blend_service::message::NetworkInfo as BlendNetworkInfo;
-use lb_chain_service::CryptarchiaInfo;
+use lb_chain_service::ChainServiceInfo;
 use lb_core::{header::HeaderId, mantle::SignedMantleTx, sdp::Declaration};
 use lb_http_api_common::{
     bodies::wallet::transfer_funds::{
@@ -57,7 +57,7 @@ impl NodeHttpClient {
         }
     }
 
-    pub async fn consensus_info(&self) -> Result<CryptarchiaInfo, Error> {
+    pub async fn consensus_info(&self) -> Result<ChainServiceInfo, Error> {
         self.http_client.consensus_info(self.base_url.clone()).await
     }
 
@@ -105,6 +105,32 @@ impl NodeHttpClient {
         let stream = self
             .http_client
             .get_blocks_stream(self.base_url.clone())
+            .await?;
+        Ok(Box::pin(stream))
+    }
+
+    /// Opens a processed-block stream from the node HTTP API with a limited
+    /// range.
+    pub async fn blocks_range_stream(
+        &self,
+        blocks_limit: Option<NonZero<usize>>,
+        slot_from: Option<u64>,
+        slot_to: Option<u64>,
+        descending: Option<bool>,
+        server_batch_size: Option<NonZero<usize>>,
+        immutable_only: Option<bool>,
+    ) -> Result<Pin<Box<dyn Stream<Item = ProcessedBlockEvent> + Send + '_>>, Error> {
+        let stream = self
+            .http_client
+            .get_blocks_range_stream(
+                self.base_url.clone(),
+                blocks_limit,
+                slot_from,
+                slot_to,
+                descending,
+                server_batch_size,
+                immutable_only,
+            )
             .await?;
         Ok(Box::pin(stream))
     }
